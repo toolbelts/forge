@@ -13,31 +13,31 @@ import (
 
 // Code 业务错误码,int32 与 errorpb proto 的 code 同型,跨边界零拷贝。
 //
-// 数值分区:
-//   - 0:           OK,唯一
-//   - 1-99:        forge 系统码,对齐 gRPC 标准
-//   - 100-9999:    forge 框架细分扩展(预留)
-//   - 10000+:      应用业务码,每业务模块预留 1000 步进
+// 数值分区(全部等宽 5 位,便于日志/检索/可视化):
+//   - 0:               OK,唯一保留
+//   - 10001-10099:     forge 系统码(语义对齐 gRPC,但不强制数值相等)
+//   - 10100-19999:     forge 框架细分扩展(预留)
+//   - 20000+:          应用业务码,每业务模块预留 1000 步进
 type Code int32
 
-// 系统级码,对齐 gRPC 语义,数值 0-15。后续 100-9999 留给框架扩展。
+// 系统级码,数值 10001-10015。后续 10100-19999 留给框架扩展。
 const (
 	CodeOK                 Code = 0
-	CodeUnknown            Code = 1
-	CodeCanceled           Code = 2
-	CodeDeadlineExceeded   Code = 3
-	CodeInvalidArgument    Code = 4
-	CodeNotFound           Code = 5
-	CodeAlreadyExists      Code = 6
-	CodePermissionDenied   Code = 7
-	CodeUnauthenticated    Code = 8
-	CodeResourceExhausted  Code = 9
-	CodeFailedPrecondition Code = 10
-	CodeAborted            Code = 11
-	CodeUnavailable        Code = 12
-	CodeInternal           Code = 13
-	CodeDataLoss           Code = 14
-	CodePanic              Code = 15
+	CodeUnknown            Code = 10001
+	CodeCanceled           Code = 10002
+	CodeDeadlineExceeded   Code = 10003
+	CodeInvalidArgument    Code = 10004
+	CodeNotFound           Code = 10005
+	CodeAlreadyExists      Code = 10006
+	CodePermissionDenied   Code = 10007
+	CodeUnauthenticated    Code = 10008
+	CodeResourceExhausted  Code = 10009
+	CodeFailedPrecondition Code = 10010
+	CodeAborted            Code = 10011
+	CodeUnavailable        Code = 10012
+	CodeInternal           Code = 10013
+	CodeDataLoss           Code = 10014
+	CodePanic              Code = 10015
 )
 
 // 内置码可读名,系统码全集。
@@ -60,7 +60,7 @@ var builtinCodeNames = map[Code]string{
 	CodePanic:              "PANIC",
 }
 
-// codeNamer 应用层注入的码名解析器,用于把业务码(10000+)映射到可读名。
+// codeNamer 应用层注入的码名解析器,用于把业务码(20000+)映射到可读名。
 // 返回空串表示该码不属于本应用,落回内置表或 CODE_<n> 兜底。
 var codeNamer atomic.Pointer[func(Code) string]
 

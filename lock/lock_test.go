@@ -74,6 +74,35 @@ func TestLocker_LockUnlock(t *testing.T) {
 	}
 }
 
+func TestLocker_FenceMonotonic(t *testing.T) {
+	_, m := newTestManager(t)
+	first := m.NewLocker("fence")
+	if err := first.TryLock(context.Background()); err != nil {
+		t.Fatalf("first lock: %v", err)
+	}
+	firstFence := first.Fence()
+	if firstFence <= 0 {
+		t.Fatalf("expected positive first fence, got %d", firstFence)
+	}
+	if err := first.Unlock(context.Background()); err != nil {
+		t.Fatalf("first unlock: %v", err)
+	}
+	if first.Fence() != 0 {
+		t.Fatalf("expected fence reset after unlock, got %d", first.Fence())
+	}
+
+	second := m.NewLocker("fence")
+	if err := second.TryLock(context.Background()); err != nil {
+		t.Fatalf("second lock: %v", err)
+	}
+	if second.Fence() <= firstFence {
+		t.Fatalf("expected second fence > first fence, got %d <= %d", second.Fence(), firstFence)
+	}
+	if err := second.Unlock(context.Background()); err != nil {
+		t.Fatalf("second unlock: %v", err)
+	}
+}
+
 func TestLocker_EmptyKey(t *testing.T) {
 	_, m := newTestManager(t)
 	locker := m.NewLocker("")
@@ -111,6 +140,21 @@ func TestLocker_TtlExpire(t *testing.T) {
 	mr.FastForward(200 * time.Millisecond)
 	if err := locker.Unlock(context.Background()); !errors.Is(err, ErrNotHeld) {
 		t.Fatalf("expected ErrNotHeld after expire, got %v", err)
+	}
+}
+
+func TestLocker_RenewExtendsTTL(t *testing.T) {
+	mr, m := newTestManager(t, WithTtl(100*time.Millisecond))
+	locker := m.NewLocker("renew")
+	if err := locker.TryLock(context.Background()); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+	mr.FastForward(80 * time.Millisecond)
+	if err := locker.Renew(context.Background()); err != nil {
+		t.Fatalf("renew: %v", err)
+	}
+	if ttl := mr.TTL(locker.Key()); ttl <= 50*time.Millisecond {
+		t.Fatalf("expected renew to extend ttl, got %s", ttl)
 	}
 }
 
@@ -239,5 +283,79 @@ func TestManager_WithPrefix(t *testing.T) {
 	}
 	if _, err := mr.Get("myapp:k"); err != nil {
 		t.Fatalf("expected redis key myapp:k to exist: %v", err)
+	}
+}
+
+func TestManager_RunAutoRenew(t *testing.T) {
+	mr, m := newTestManager(t, WithTtl(90*time.Millisecond), WithRetry(0))
+	err := m.Run(context.Background(), "run-renew", func(ctx context.Context, locker *Locker) error {
+		if locker.Fence() <= 0 {
+			t.Fatalf("expected positive fence inside Run, got %d", locker.Fence())
+		}
+		time.Sleep(45 * time.Millisecond)
+		mr.FastForward(70 * time.Millisecond)
+		contender := m.NewLocker("run-renew")
+		if err := contender.TryLock(ctx); !errors.Is(err, ErrLocked) {
+			t.Fatalf("expected auto-renewed lock to remain held, got %v", err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	contender := m.NewLocker("run-renew")
+	if err := contender.TryLock(context.Background()); err != nil {
+		t.Fatalf("expected lock released after Run, got %v", err)
+	}
+}
+
+func TestManager_RunUnlocksOnPanic(t *testing.T) {
+	_, m := newTestManager(t, WithTtl(90*time.Millisecond), WithRetry(0))
+	func() {
+		defer func() {
+			if p := recover(); p != "boom" {
+				t.Fatalf("expected Run to re-panic with boom, got %v", p)
+			}
+		}()
+		_ = m.Run(context.Background(), "run-panic", func(context.Context, *Locker) error {
+			panic("boom")
+		})
+	}()
+
+	contender := m.NewLocker("run-panic")
+	if err := contender.TryLock(context.Background()); err != nil {
+		t.Fatalf("expected lock released after panic, got %v", err)
+	}
+}
+
+func TestManager_RunCancelsContextOnRenewFailure(t *testing.T) {
+	_, m := newTestManager(t, WithTtl(60*time.Millisecond), WithRetry(0))
+	parent, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	fnCanceled := false
+	err := m.Run(parent, "run-renew-fail", func(ctx context.Context, locker *Locker) error {
+		if locker.Fence() <= 0 {
+			t.Fatalf("expected positive fence inside Run, got %d", locker.Fence())
+		}
+		if err := m.rdb.Del(context.Background(), locker.Key()).Err(); err != nil {
+			t.Fatalf("delete lock key: %v", err)
+		}
+		<-ctx.Done()
+		fnCanceled = true
+		return ctx.Err()
+	})
+	if err == nil {
+		t.Fatal("expected Run to return renewal/unlock error")
+	}
+	if !fnCanceled {
+		t.Fatal("expected Run context to be canceled after renew failure")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected joined error to include context canceled, got %v", err)
+	}
+	if !errors.Is(err, ErrNotHeld) {
+		t.Fatalf("expected joined error to include ErrNotHeld, got %v", err)
 	}
 }

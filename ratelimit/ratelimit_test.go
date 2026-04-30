@@ -2,6 +2,7 @@ package ratelimit
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -382,12 +383,14 @@ func TestLimiterAllowFailClosed(t *testing.T) {
 	}
 }
 
-// TestRedisRuleStoreLoadRules 验证会跳过坏数据并返回有效规则。
+// TestRedisRuleStoreLoadRules 验证会跳过 JSON 解码失败的脏数据，
+// 但语义非法的规则会原样返回，由 Limiter.Reload 统一过滤。
 func TestRedisRuleStoreLoadRules(t *testing.T) {
 	_, client := newTestRedis(t)
 
 	if err := client.HSet(context.Background(), "ratelimit:rules",
 		"bad", "{",
+		"invalid", `{"name":"invalid","key":"ip","path":"/v1/invalid","path_match":"exact","total":0,"window":"1s"}`,
 		"good1", `{"name":"rule-1","key":"ip","path":"/v1/a","path_match":"exact","total":1,"window":"1s"}`,
 		"good2", `{"name":"rule-2","key":"token","path":"/v1/b","path_match":"exact","total":2,"window":"2s"}`,
 	).Err(); err != nil {
@@ -399,11 +402,36 @@ func TestRedisRuleStoreLoadRules(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load rules: %v", err)
 	}
-	if len(rules) != 2 {
-		t.Fatalf("expected 2 valid rules, got %d", len(rules))
+	if len(rules) != 3 {
+		t.Fatalf("expected 3 decoded rules, got %d", len(rules))
 	}
-	if rules[0].Name != "rule-1" || rules[1].Name != "rule-2" {
-		t.Fatalf("expected sorted valid rules, got %+v", rules)
+	// slices.Sort 排序的是 hash field name (good1 / good2 / invalid),不是 rule.Name。
+	if rules[0].Name != "rule-1" || rules[1].Name != "rule-2" || rules[2].Name != "invalid" {
+		t.Fatalf("expected sorted decoded rules, got %+v", rules)
+	}
+}
+
+// TestLimiterReloadSkipsInvalidRules 验证 Reload 会跳过单条非法规则并保留其它规则。
+func TestLimiterReloadSkipsInvalidRules(t *testing.T) {
+	_, client := newTestRedis(t)
+	limiter := NewLimiter(client)
+
+	err := limiter.Reload(context.Background(), []Rule{
+		{Name: "bad", Key: "ip", Path: "/v1/bad", PathMatch: PathMatchExact, Total: 0, Window: "1s"},
+		{Name: "good", Key: "ip", Path: "/v1/good", PathMatch: PathMatchExact, Total: 1, Window: "1s"},
+	})
+	if err != nil {
+		t.Fatalf("reload should skip invalid rules, got %v", err)
+	}
+
+	quota, err := limiter.Allow(newTestContext("/v1/good", "GET", map[string]any{
+		meta.MetaUserIp: "127.0.0.1",
+	}))
+	if err != nil {
+		t.Fatalf("allow good rule: %v", err)
+	}
+	if !quota.Allowed || quota.RuleName != "good" {
+		t.Fatalf("expected good rule to remain active, got %+v", quota)
 	}
 }
 
@@ -443,6 +471,32 @@ func TestRedisRuleStoreSetAndDelete(t *testing.T) {
 	}
 	if _, ok := values["rule-1"]; ok {
 		t.Fatal("expected rule to be deleted from redis hash")
+	}
+}
+
+// TestRedisRuleStoreSetRuleInvalidNotWritten 验证非法规则不会被写入 Redis。
+func TestRedisRuleStoreSetRuleInvalidNotWritten(t *testing.T) {
+	_, client := newTestRedis(t)
+	store := NewRedisRuleStore(client)
+
+	rule := Rule{
+		Name:      "bad-rule",
+		Key:       "ip",
+		Path:      "/v1/users",
+		PathMatch: PathMatchExact,
+		Total:     0,
+		Window:    "1s",
+	}
+	if err := store.SetRule(context.Background(), rule); !errors.Is(err, ErrInvalidRule) {
+		t.Fatalf("expected ErrInvalidRule, got %v", err)
+	}
+
+	values, err := client.HGetAll(context.Background(), "ratelimit:rules").Result()
+	if err != nil {
+		t.Fatalf("read rules after invalid set: %v", err)
+	}
+	if len(values) != 0 {
+		t.Fatalf("expected no invalid rule written, got %v", values)
 	}
 }
 

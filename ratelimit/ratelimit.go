@@ -143,13 +143,19 @@ func NewLimiter(rdb redis.UniversalClient, opts ...Option) *Limiter {
 }
 
 // Reload 重新编译并替换全部规则快照。
-func (l *Limiter) Reload(_ context.Context, rules []Rule) error {
+// 单条规则编译失败时会记 warn 日志并跳过，不影响其它规则生效，整体不再返回错误。
+func (l *Limiter) Reload(ctx context.Context, rules []Rule) error {
 	compiled := make([]compiledRule, 0, len(rules))
 	for _, rule := range rules {
 		// 先将外部规则编译为运行时结构，避免请求路径上重复做解析工作。
 		cr, err := compileRule(rule)
 		if err != nil {
-			return err
+			log.Ctx(ctx).
+				Warn().
+				Err(err).
+				Str("rule_name", rule.Name).
+				Msg("ratelimit rule compile failed, skip")
+			continue
 		}
 		compiled = append(compiled, *cr)
 	}
@@ -471,6 +477,7 @@ func (s *RedisRuleStore) LoadRules(ctx context.Context) ([]Rule, error) {
 				Msg("ratelimit rule decode failed")
 			continue
 		}
+		// 语义校验交给 Limiter.Reload，避免双重 compile 与重复 warn。
 		rules = append(rules, rule)
 	}
 
@@ -483,12 +490,17 @@ func (s *RedisRuleStore) SetRule(ctx context.Context, rule Rule) error {
 		return ErrNilRedisClient
 	}
 
-	payload, err := json.Marshal(rule)
+	compiled, err := compileRule(rule)
 	if err != nil {
 		return err
 	}
 
-	return s.rdb.HSet(ctx, s.rulesKey(), rule.Name, string(payload)).Err()
+	payload, err := json.Marshal(compiled.rule)
+	if err != nil {
+		return err
+	}
+
+	return s.rdb.HSet(ctx, s.rulesKey(), compiled.rule.Name, string(payload)).Err()
 }
 
 // DeleteRule 从 Redis Hash 中删除指定规则。

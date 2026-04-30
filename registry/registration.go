@@ -2,7 +2,6 @@ package registry
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -10,6 +9,26 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 )
+
+// luaRegisterInstance 原子完成实例冲突检查与写入:
+//   - key 不存在:写入 payload 并设置 ttl
+//   - key 存在且 addr 相同:覆盖 payload 并续 ttl
+//   - key 存在且 addr 不同:返回 -1 表示实例冲突
+//
+// Redis 内置 cjson 解析失败时按旧行为允许覆盖,避免坏数据永久阻塞自愈。
+const luaRegisterInstance = `
+local existing = redis.call('GET', KEYS[1])
+if existing then
+    local ok, prev = pcall(cjson.decode, existing)
+    if ok and prev["addr"] ~= ARGV[2] then
+        return -1
+    end
+end
+redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
+return 1
+`
+
+var registerScript = redis.NewScript(luaRegisterInstance)
 
 // Registration 一次成功注册的句柄,持有心跳 goroutine 的取消函数。
 // Deregister 后不可重用,需重新调用 Manager.Register 派生新句柄。
@@ -37,27 +56,17 @@ func (m *Manager) Register(ctx context.Context, instance Instance) (*Registratio
 
 	key := m.instanceKey(instance.Service, instance.Id)
 
-	existing, err := m.rdb.Get(ctx, key).Result()
-	switch {
-	case errors.Is(err, redis.Nil):
-		// key 不存在,正常路径。
-	case err != nil:
-		return nil, fmt.Errorf("registry: precheck get failed: %w", err)
-	default:
-		var prev Instance
-		if jerr := json.Unmarshal([]byte(existing), &prev); jerr == nil && prev.Addr != instance.Addr {
-			return nil, fmt.Errorf("%w: service=%s id=%s prev_addr=%s new_addr=%s",
-				ErrInstanceConflict, instance.Service, instance.Id, prev.Addr, instance.Addr)
-		}
-		// 同 addr 视为重启复活,允许覆盖续约。
-	}
-
 	value, err := json.Marshal(&instance)
 	if err != nil {
 		return nil, fmt.Errorf("registry: marshal failed: %w", err)
 	}
-	if err := m.rdb.Set(ctx, key, value, m.opt.ttl).Err(); err != nil {
-		return nil, fmt.Errorf("registry: setex failed: %w", err)
+	result, err := registerScript.Run(ctx, m.rdb, []string{key}, value, instance.Addr, m.opt.ttl.Milliseconds()).Int64()
+	if err != nil {
+		return nil, fmt.Errorf("registry: register script failed: %w", err)
+	}
+	if result == -1 {
+		return nil, fmt.Errorf("%w: service=%s id=%s new_addr=%s",
+			ErrInstanceConflict, instance.Service, instance.Id, instance.Addr)
 	}
 
 	hbCtx, cancel := context.WithCancel(context.Background())

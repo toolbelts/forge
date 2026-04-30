@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"sync"
 	"testing"
@@ -126,6 +127,55 @@ func TestRegister_Conflict(t *testing.T) {
 
 	if _, err := m.Register(context.Background(), Instance{Service: "svc", Id: "dup", Addr: "2.2.2.2:9090"}); !errors.Is(err, ErrInstanceConflict) {
 		t.Fatalf("expected ErrInstanceConflict, got %v", err)
+	}
+}
+
+func TestRegister_ConcurrentConflict(t *testing.T) {
+	_, m := newTestManager(t, WithHeartbeat(2*time.Second), WithTtl(10*time.Second))
+	const workers = 20
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	successes := make(chan *Registration, workers)
+	conflicts := make(chan error, workers)
+	unexpected := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			reg, err := m.Register(context.Background(), Instance{
+				Service: "svc",
+				Id:      "race",
+				Addr:    fmt.Sprintf("10.0.0.%d:9090", i),
+			})
+			switch {
+			case err == nil:
+				successes <- reg
+			case errors.Is(err, ErrInstanceConflict):
+				conflicts <- err
+			default:
+				unexpected <- err
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(successes)
+	close(conflicts)
+	close(unexpected)
+
+	if len(unexpected) != 0 {
+		t.Fatalf("unexpected register error: %v", <-unexpected)
+	}
+	if len(successes) != 1 {
+		t.Fatalf("expected exactly 1 successful register, got %d", len(successes))
+	}
+	if len(conflicts) != workers-1 {
+		t.Fatalf("expected %d conflicts, got %d", workers-1, len(conflicts))
+	}
+	for reg := range successes {
+		defer func(reg *Registration) { _ = reg.Deregister(context.Background()) }(reg)
 	}
 }
 
@@ -296,9 +346,9 @@ func (f *fakeClientConn) UpdateState(s resolver.State) error {
 	return nil
 }
 
-func (f *fakeClientConn) ReportError(error)                {}
-func (f *fakeClientConn) NewAddress([]resolver.Address)    {}
-func (f *fakeClientConn) NewServiceConfig(string)          {}
+func (f *fakeClientConn) ReportError(error)             {}
+func (f *fakeClientConn) NewAddress([]resolver.Address) {}
+func (f *fakeClientConn) NewServiceConfig(string)       {}
 func (f *fakeClientConn) ParseServiceConfig(string) *serviceconfig.ParseResult {
 	return nil
 }

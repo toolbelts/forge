@@ -172,6 +172,8 @@ redis.call('PEXPIRE', KEYS[5], ARGV[3])
 if ARGV[6] == "1" then
     redis.call('DEL', KEYS[4])
     redis.call('SET', KEYS[2], ARGV[1], 'PX', ARGV[3])
+else
+    redis.call('SET', KEYS[4], ARGV[1], 'PX', ARGV[3])
 end
 return 1
 `

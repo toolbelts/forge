@@ -307,6 +307,45 @@ func TestRefresh_OK_NoRotation(t *testing.T) {
 	}
 }
 
+// TestRefresh_NoRotationConsecutive 验证关闭 refresh 旋转时,refresh entry 会更新为最新 access,
+// 连续 Refresh 不会留下上一代 access_token。
+func TestRefresh_NoRotationConsecutive(t *testing.T) {
+	mr, mgr := newTestManager(t, WithRefreshRotation(false))
+	first, err := mgr.Create(context.Background(), 1, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	second, err := mgr.Refresh(context.Background(), first.RefreshToken)
+	if err != nil {
+		t.Fatalf("refresh second: %v", err)
+	}
+	third, err := mgr.Refresh(context.Background(), first.RefreshToken)
+	if err != nil {
+		t.Fatalf("refresh third: %v", err)
+	}
+
+	if first.RefreshToken != second.RefreshToken || second.RefreshToken != third.RefreshToken {
+		t.Fatal("expected refresh token to remain stable when rotation is disabled")
+	}
+	if mr.Exists(mgr.accessKey(first.AccessToken)) {
+		t.Fatal("expected first access entry deleted")
+	}
+	if mr.Exists(mgr.accessKey(second.AccessToken)) {
+		t.Fatal("expected second access entry deleted after third refresh")
+	}
+	if !mr.Exists(mgr.accessKey(third.AccessToken)) {
+		t.Fatal("expected latest access entry to exist")
+	}
+	if _, err := mgr.Validate(context.Background(), third.AccessToken); err != nil {
+		t.Fatalf("expected latest access token to validate: %v", err)
+	}
+	members := mustSMembers(t, mr, mgr.userKey(1))
+	if len(members) != 1 || members[0] != third.AccessToken {
+		t.Fatalf("expected user index to contain only latest access, got %v", members)
+	}
+}
+
 // TestRefresh_Replay 验证旋转模式下重放旧 refresh_token 会失败。
 func TestRefresh_Replay(t *testing.T) {
 	_, mgr := newTestManager(t)

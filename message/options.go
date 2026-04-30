@@ -1,6 +1,9 @@
 package message
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // SmtpConfig 是一个 SMTP 后端的配置。
 //
@@ -143,25 +146,28 @@ type config struct {
 	emailSpecs []emailSpec
 	smsSpecs   []smsSpec
 	templates  []templateSpec
+	errs       []error
 }
 
 // Option 是 New(opts...) 的可选配置。
 type Option func(*config)
 
-// WithSmtp 注册一个 SMTP 后端;Host / From / Port 任一为空则静默跳过。
+// WithSmtp 注册一个 SMTP 后端;Host / From / Port 任一为空则记录配置错误,New 返回时报失败。
 func WithSmtp(cfg SmtpConfig) Option {
 	return func(c *config) {
 		if cfg.Host == "" || cfg.From == "" || cfg.Port == 0 {
+			c.errs = append(c.errs, fmt.Errorf("message: smtp %q missing host/port/from", cfg.Name))
 			return
 		}
 		c.emailSpecs = append(c.emailSpecs, cfg)
 	}
 }
 
-// WithSendGrid 注册一个 SendGrid HTTP API 后端;ApiKey / From 任一为空则静默跳过。
+// WithSendGrid 注册一个 SendGrid HTTP API 后端;ApiKey / From 任一为空则记录配置错误,New 返回时报失败。
 func WithSendGrid(cfg SendGridConfig) Option {
 	return func(c *config) {
 		if cfg.ApiKey == "" || cfg.From == "" {
+			c.errs = append(c.errs, fmt.Errorf("message: sendgrid %q missing api_key/from", cfg.Name))
 			return
 		}
 		c.emailSpecs = append(c.emailSpecs, cfg)
@@ -185,10 +191,11 @@ func WithEmailTemplate(id, subject, htmlBody, textBody string) Option {
 }
 
 // WithTwilioSms 注册一个 Twilio Messages 后端(raw mode)。
-// AccountSid / AuthToken / From 任一为空则静默跳过。
+// AccountSid / AuthToken / From 任一为空则记录配置错误,New 返回时报失败。
 func WithTwilioSms(cfg TwilioConfig) Option {
 	return func(c *config) {
 		if cfg.AccountSid == "" || cfg.AuthToken == "" || cfg.From == "" {
+			c.errs = append(c.errs, fmt.Errorf("message: twilio %q missing account_sid/auth_token/from", cfg.Name))
 			return
 		}
 		c.smsSpecs = append(c.smsSpecs, cfg)
@@ -196,11 +203,12 @@ func WithTwilioSms(cfg TwilioConfig) Option {
 }
 
 // WithBytePlusSms 注册一个 BytePlus SMS 后端(template mode)。
-// AccessKey / SecretKey / Region / SmsAccount / Sign 任一为空则静默跳过。
+// AccessKey / SecretKey / Region / SmsAccount / Sign 任一为空则记录配置错误,New 返回时报失败。
 func WithBytePlusSms(cfg BytePlusConfig) Option {
 	return func(c *config) {
 		if cfg.AccessKey == "" || cfg.SecretKey == "" || cfg.Region == "" ||
 			cfg.SmsAccount == "" || cfg.Sign == "" {
+			c.errs = append(c.errs, fmt.Errorf("message: byteplus %q missing access_key/secret_key/region/sms_account/sign", cfg.Name))
 			return
 		}
 		c.smsSpecs = append(c.smsSpecs, cfg)
@@ -208,10 +216,11 @@ func WithBytePlusSms(cfg BytePlusConfig) Option {
 }
 
 // WithAliyunSms 注册一个 Aliyun 国际版 SMS 后端(SendMessageToGlobe,raw mode)。
-// AccessKey / SecretKey / Endpoint 任一为空则静默跳过。
+// AccessKey / SecretKey / Endpoint 任一为空则记录配置错误,New 返回时报失败。
 func WithAliyunSms(cfg AliyunSmsConfig) Option {
 	return func(c *config) {
 		if cfg.AccessKey == "" || cfg.SecretKey == "" || cfg.Endpoint == "" {
+			c.errs = append(c.errs, fmt.Errorf("message: aliyun-sms %q missing access_key/secret_key/endpoint", cfg.Name))
 			return
 		}
 		c.smsSpecs = append(c.smsSpecs, cfg)
@@ -219,11 +228,12 @@ func WithAliyunSms(cfg AliyunSmsConfig) Option {
 }
 
 // WithAliyunCnSms 注册一个 Aliyun 国内版 SMS 后端(Dysmsapi SendSms,template mode)。
-// AccessKey / SecretKey 任一为空则静默跳过;Endpoint 留空走默认 dysmsapi.aliyuncs.com。
+// AccessKey / SecretKey 任一为空则记录配置错误,New 返回时报失败;Endpoint 留空走默认 dysmsapi.aliyuncs.com。
 // SignName 留空表示要求 SmsMessage.SignName 必须 per-message 提供。
 func WithAliyunCnSms(cfg AliyunCnSmsConfig) Option {
 	return func(c *config) {
 		if cfg.AccessKey == "" || cfg.SecretKey == "" {
+			c.errs = append(c.errs, fmt.Errorf("message: aliyun-cn-sms %q missing access_key/secret_key", cfg.Name))
 			return
 		}
 		c.smsSpecs = append(c.smsSpecs, cfg)

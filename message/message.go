@@ -36,6 +36,9 @@ func New(opts ...Option) (*Manager, error) {
 	for _, opt := range opts {
 		opt(c)
 	}
+	if len(c.errs) > 0 {
+		return nil, errors.Join(c.errs...)
+	}
 
 	m := &Manager{
 		templates: make(map[string]*emailTemplate, len(c.templates)),

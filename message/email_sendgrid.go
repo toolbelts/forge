@@ -41,6 +41,9 @@ func (s *sendGridSender) Name() string {
 }
 
 func (s *sendGridSender) Send(ctx context.Context, msg EmailMessage) error {
+	sendCtx, cancel := context.WithTimeout(ctx, pickTimeout(s.cfg.Timeout))
+	defer cancel()
+
 	mail := sgmail.NewV3Mail()
 	mail.SetFrom(sgmail.NewEmail(s.cfg.FromName, s.cfg.From))
 	mail.Subject = msg.Subject
@@ -70,7 +73,7 @@ func (s *sendGridSender) Send(ctx context.Context, msg EmailMessage) error {
 	req.Method = "POST"
 	req.Body = sgmail.GetRequestBody(mail)
 
-	resp, err := sendgrid.MakeRequestWithContext(ctx, req)
+	resp, err := sendgrid.MakeRequestWithContext(sendCtx, req)
 	if err != nil {
 		return fmt.Errorf("message: sendgrid send: %w", err)
 	}

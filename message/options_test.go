@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestWithSmtp_SkipsWhenIncomplete(t *testing.T) {
+func TestWithSmtp_RecordsErrorWhenIncomplete(t *testing.T) {
 	cases := []SmtpConfig{
 		{Name: "no-host", Port: 587, From: "a@b"},
 		{Name: "no-port", Host: "h", From: "a@b"},
@@ -15,7 +15,10 @@ func TestWithSmtp_SkipsWhenIncomplete(t *testing.T) {
 		c := &config{}
 		WithSmtp(cfg)(c)
 		if len(c.emailSpecs) != 0 {
-			t.Fatalf("WithSmtp should skip incomplete %q, got %d specs", cfg.Name, len(c.emailSpecs))
+			t.Fatalf("WithSmtp should not register incomplete %q, got %d specs", cfg.Name, len(c.emailSpecs))
+		}
+		if len(c.errs) != 1 {
+			t.Fatalf("WithSmtp should record incomplete config error, got %d errors", len(c.errs))
 		}
 	}
 }
@@ -35,37 +38,60 @@ func TestWithSmtp_AccumulatesInOrder(t *testing.T) {
 	}
 }
 
-func TestWithSendGrid_SkipsWhenIncomplete(t *testing.T) {
+func TestWithSendGrid_RecordsErrorWhenIncomplete(t *testing.T) {
 	c := &config{}
 	WithSendGrid(SendGridConfig{Name: "no-key", From: "a@b"})(c)
 	WithSendGrid(SendGridConfig{Name: "no-from", ApiKey: "k"})(c)
 	if len(c.emailSpecs) != 0 {
-		t.Fatalf("WithSendGrid should skip incomplete configs, got %d specs", len(c.emailSpecs))
+		t.Fatalf("WithSendGrid should not register incomplete configs, got %d specs", len(c.emailSpecs))
+	}
+	if len(c.errs) != 2 {
+		t.Fatalf("WithSendGrid should record 2 config errors, got %d", len(c.errs))
 	}
 }
 
-func TestWithTwilioSms_SkipsWhenIncomplete(t *testing.T) {
+func TestWithTwilioSms_RecordsErrorWhenIncomplete(t *testing.T) {
 	c := &config{}
 	WithTwilioSms(TwilioConfig{Name: "no-token", AccountSid: "AC", From: "+1"})(c)
 	WithTwilioSms(TwilioConfig{Name: "no-from", AccountSid: "AC", AuthToken: "t"})(c)
 	if len(c.smsSpecs) != 0 {
 		t.Fatalf("expected 0 sms specs from incomplete twilio configs, got %d", len(c.smsSpecs))
 	}
+	if len(c.errs) != 2 {
+		t.Fatalf("WithTwilioSms should record 2 config errors, got %d", len(c.errs))
+	}
 }
 
-func TestWithBytePlusSms_SkipsWhenIncomplete(t *testing.T) {
+func TestWithBytePlusSms_RecordsErrorWhenIncomplete(t *testing.T) {
 	c := &config{}
 	WithBytePlusSms(BytePlusConfig{Name: "no-sign", AccessKey: "ak", SecretKey: "sk", Region: "r", SmsAccount: "a"})(c)
 	if len(c.smsSpecs) != 0 {
 		t.Fatalf("expected 0 sms specs without sign, got %d", len(c.smsSpecs))
 	}
+	if len(c.errs) != 1 {
+		t.Fatalf("WithBytePlusSms should record config error, got %d", len(c.errs))
+	}
 }
 
-func TestWithAliyunSms_SkipsWhenIncomplete(t *testing.T) {
+func TestWithAliyunSms_RecordsErrorWhenIncomplete(t *testing.T) {
 	c := &config{}
 	WithAliyunSms(AliyunSmsConfig{Name: "no-endpoint", AccessKey: "ak", SecretKey: "sk"})(c)
 	if len(c.smsSpecs) != 0 {
 		t.Fatalf("expected 0 sms specs without endpoint, got %d", len(c.smsSpecs))
+	}
+	if len(c.errs) != 1 {
+		t.Fatalf("WithAliyunSms should record config error, got %d", len(c.errs))
+	}
+}
+
+func TestWithAliyunCnSms_RecordsErrorWhenIncomplete(t *testing.T) {
+	c := &config{}
+	WithAliyunCnSms(AliyunCnSmsConfig{Name: "no-secret", AccessKey: "ak"})(c)
+	if len(c.smsSpecs) != 0 {
+		t.Fatalf("expected 0 sms specs without secret key, got %d", len(c.smsSpecs))
+	}
+	if len(c.errs) != 1 {
+		t.Fatalf("WithAliyunCnSms should record config error, got %d", len(c.errs))
 	}
 }
 

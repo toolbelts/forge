@@ -136,10 +136,10 @@ func TestSendEmail_InvalidMessage(t *testing.T) {
 		templates: map[string]*emailTemplate{},
 	}
 	cases := []EmailMessage{
-		{},                                // missing everything
-		{To: "a@b", Subject: "s"},         // missing body
-		{To: "a@b", Text: "t"},            // missing subject
-		{Subject: "s", Text: "t"},         // missing to
+		{},                        // missing everything
+		{To: "a@b", Subject: "s"}, // missing body
+		{To: "a@b", Text: "t"},    // missing subject
+		{Subject: "s", Text: "t"}, // missing to
 	}
 	for i, msg := range cases {
 		if err := m.SendEmail(context.Background(), msg); !errors.Is(err, ErrInvalidEmailMessage) {
@@ -392,6 +392,16 @@ func TestNew_TemplateOnlyStillNeedsBackend(t *testing.T) {
 	_, err := New(WithEmailTemplate("welcome", "s", "<p>x</p>", ""))
 	if !errors.Is(err, ErrNoBackendConfigured) {
 		t.Fatalf("expected ErrNoBackendConfigured, got %v", err)
+	}
+}
+
+func TestNew_IncompleteProviderFailsFast(t *testing.T) {
+	_, err := New(WithSmtp(SmtpConfig{Name: "bad", Port: 587, From: "a@b"}))
+	if err == nil {
+		t.Fatal("expected incomplete provider config to fail fast")
+	}
+	if errors.Is(err, ErrNoBackendConfigured) {
+		t.Fatalf("expected config error before backend count check, got %v", err)
 	}
 }
 

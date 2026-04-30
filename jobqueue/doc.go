@@ -1,0 +1,13 @@
+// Package jobqueue 提供基于 Redis LIST + BRPOP/BLMPOP 的极简任务队列:
+//
+//   - Publish(ctx, topic, args...) 把参数 JSON 化后 LPUSH 到 "{prefix}{topic}"
+//   - Subscribe(topic, fn) 通过反射拿到 fn 的参数类型,后台 worker BRPOP 阻塞拉取并按类型解码后调用
+//   - WithBatch(n) 可切到 BLMPOP COUNT n 一次拉多条,适合吞吐优先、单条要求不严的场景
+//   - WithConcurrency(n) 在同 topic 上起多个 worker 抢同一个 key
+//
+// 投递语义为 at-most-once:worker 进程崩溃可能丢失正在处理的消息,业务对此应有预期;
+// handler 内 panic 由 recover 兜住、返回 err 仅打 Error 日志,均不会重新入队也不进死信。
+//
+// fn 必须形如 func(ctx context.Context, ...) error —— 第一个参数固定 context.Context,
+// 出参恰好 1 个 error,其它入参类型任意。Publish 必须按相同顺序传值。
+package jobqueue

@@ -100,10 +100,10 @@ func TestCodeOfFallback(t *testing.T) {
 
 func TestToGrpcCodeBuiltin(t *testing.T) {
 	cases := map[errkit.Code]codes.Code{
-		errkit.CodeOK:                 codes.OK,
-		errkit.CodeNotFound:           codes.NotFound,
-		errkit.CodePanic:              codes.Internal,
-		errkit.Code(99999):            codes.Internal, // 未知码兜底
+		errkit.CodeOK:       codes.OK,
+		errkit.CodeNotFound: codes.NotFound,
+		errkit.CodePanic:    codes.Internal,
+		errkit.Code(99999):  codes.Internal, // 未知码兜底
 	}
 	for c, want := range cases {
 		if got := errkit.ToGrpcCode(c); got != want {

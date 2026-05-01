@@ -11,10 +11,10 @@ import (
 
 // twilioFakeServer 用 httptest 替换真实 Twilio,记录最近一次请求。
 type twilioFakeServer struct {
-	srv     *httptest.Server
-	last    *http.Request
-	body    url.Values
-	status  int // 默认 200
+	srv    *httptest.Server
+	last   *http.Request
+	body   url.Values
+	status int // 默认 200
 }
 
 func newTwilioFakeServer(t *testing.T) *twilioFakeServer {

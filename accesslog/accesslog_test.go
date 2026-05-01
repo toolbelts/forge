@@ -10,8 +10,8 @@ import (
 
 	json "github.com/goccy/go-json"
 	"github.com/rs/zerolog"
-	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"go.opentelemetry.io/otel/trace"
+	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
 

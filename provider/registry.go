@@ -199,4 +199,3 @@ func firstPrivateIpv4() (string, error) {
 	}
 	return "", fmt.Errorf("registry: no private ipv4 found")
 }
-

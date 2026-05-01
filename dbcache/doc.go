@@ -26,4 +26,14 @@
 //
 // 多实例提示:本包不实装跨进程失效广播。Set/Delete 只影响本进程 + 共享 Store(L2);
 // 其它进程的 L1 通过 TTL 自然过期。需要严格一致时另行加 Invalidator 扩展。
+//
+// 可观测性(OTel,默认 noop,显式接入):
+//   - dbcache.New 默认装 NoopMetrics{} 与 NoopTracer(),不上报任何数据。
+//     业务想接 OTel:WithMetrics(dbcache.NewOTelMetrics()) / WithTracer(dbcache.NewOTelTracer()),
+//     forge MetricsProvider/TraceProvider 的 metrics.enabled / trace.enabled 控制全局 noop,
+//     未启用时这两个工厂返回的实现也是 noop,零开销。
+//   - 指标:dbcache.hits / dbcache.misses(Counter,标签 dbcache.name);
+//     dbcache.load.duration(Histogram,单位 ms,标签 dbcache.name + dbcache.status=ok|not_found|error)。
+//   - 追踪:Get/MGet/Set/Delete/Warm 各启 span dbcache.<Op>;loader 回源启子 span dbcache.Loader。
+//     attribute 仅记 cache 名与 key 数量,不记 key 值(防泄露)。
 package dbcache

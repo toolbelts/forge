@@ -340,6 +340,13 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 
 > **失效**:dbcache 不实装跨进程广播,多实例下 L1 靠 TTL 自然收敛。业务方写后失效仍由自家 model 的 bun `AfterUpdate/AfterDelete` hook 调 `cache.Delete`。
 
+**可观测性(默认 noop,显式接入 OTel)**:业务在 `dbcache.New` 时显式 `dbcache.WithMetrics(dbcache.NewOTelMetrics())` 和/或 `dbcache.WithTracer(dbcache.NewOTelTracer())` 才会上报。两个工厂内部走全局 `otel.MeterProvider` / `otel.TracerProvider`,与 `metrics.enabled` / `trace.enabled` 联动 —— 未启用时是 noop。
+
+- 指标:`dbcache.hits` / `dbcache.misses`(Counter,标签 `dbcache.name`)、`dbcache.load.duration`(Histogram,单位 `ms`,标签 `dbcache.name` + `dbcache.status`=`ok`|`not_found`|`error`)。
+- 追踪:`dbcache.Get` / `dbcache.MGet` / `dbcache.Set` / `dbcache.Delete` / `dbcache.Warm` 外层 span;loader 回源用子 span `dbcache.Loader`;Redis store 走 redisotel 自动作为更深一层子 span 出现。
+- attribute 只记 cache 名与 key 数量,不记 key 值(防泄露)。
+- 不传或显式传 `dbcache.NoopMetrics{}` / `dbcache.NoopTracer()` 都是无可观测性。
+
 ### AccessLogProvider — `accesslog.*`
 
 | 键 | 类型 | 默认值 | 说明 |

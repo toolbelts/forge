@@ -5,6 +5,7 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
@@ -25,16 +26,18 @@ type options struct {
 	keyPrefix   string
 	logger      zerolog.Logger
 	metrics     Metrics
+	tracer      trace.Tracer
 }
 
-// defaultOptions 给 New 用的默认值集合。store 留空由 New 时按需补 NewMemoryStore。
+// defaultOptions 给 New 用的默认值集合。store 留空由 New 时按需补 NewMemoryStore;
+// metrics / tracer 留 nil 由 New 时按需补 NoopMetrics / NoopTracer ——
+// 不在包级 var 上直接挂 noop 实例是为了让"未初始化"和"显式传 noop"两种状态都能识别。
 var defaultOptions = options{
 	ttl:         defaultTtl,
 	negativeTtl: defaultNegativeTtl,
 	jitter:      defaultJitter,
 	codec:       defaultCodec,
 	logger:      log.Logger,
-	metrics:     noopMetrics{},
 }
 
 // Option 调整单个 Cache 的行为。
@@ -122,11 +125,22 @@ func WithLogger(l zerolog.Logger) Option {
 	}
 }
 
-// WithMetrics 注入指标采集器,记录命中/未命中/loader 耗时。默认 noop。
+// WithMetrics 注入指标采集器,记录命中/未命中/loader 耗时。
+// 默认 NoopMetrics{}(不上报)。接 OTel:WithMetrics(dbcache.NewOTelMetrics())。
 func WithMetrics(m Metrics) Option {
 	return func(o *options) {
 		if m != nil {
 			o.metrics = m
+		}
+	}
+}
+
+// WithTracer 注入 OTel Tracer,Cache 的 Get/MGet/Set/Delete/Warm/loader 会创建 span。
+// 默认 NoopTracer()(不产 span)。接 OTel:WithTracer(dbcache.NewOTelTracer())。
+func WithTracer(t trace.Tracer) Option {
+	return func(o *options) {
+		if t != nil {
+			o.tracer = t
 		}
 	}
 }

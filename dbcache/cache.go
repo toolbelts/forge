@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -41,6 +43,7 @@ type Cache[K comparable, V any] struct {
 	keyPrefix   string
 	logger      zerolog.Logger
 	metrics     Metrics
+	tracer      trace.Tracer
 
 	sf     singleflight.Group
 	closed atomic.Bool
@@ -63,6 +66,15 @@ func New[K comparable, V any](loader LoaderFunc[K, V], opts ...Option) *Cache[K,
 	}
 	if o.store == nil {
 		o.store = NewMemoryStore(defaultMemSize)
+	}
+	// metrics / tracer 默认是 noop,业务想接 OTel 显式 WithMetrics(NewOTelMetrics()) /
+	// WithTracer(NewOTelTracer()),保持"显式优于隐式" —— 也避开了 NewOTelMetrics 里
+	// instrument 绑定 MeterProvider 时机的潜在陷阱(默认下根本不创建 instrument)。
+	if o.metrics == nil {
+		o.metrics = NoopMetrics{}
+	}
+	if o.tracer == nil {
+		o.tracer = NoopTracer()
 	}
 
 	var bl BatchLoaderFunc[K, V]
@@ -91,6 +103,7 @@ func New[K comparable, V any](loader LoaderFunc[K, V], opts ...Option) *Cache[K,
 		keyPrefix:   o.keyPrefix,
 		logger:      o.logger,
 		metrics:     o.metrics,
+		tracer:      o.tracer,
 	}
 }
 
@@ -102,15 +115,29 @@ func New[K comparable, V any](loader LoaderFunc[K, V], opts ...Option) *Cache[K,
 //   - (zero, err):Loader 返回其它错误,或 Cache 已 Close。
 func (c *Cache[K, V]) Get(ctx context.Context, k K) (V, error) {
 	var zero V
+	ctx, span := c.tracer.Start(ctx, "dbcache.Get", trace.WithAttributes(attrCacheName.String(c.name)))
+	defer span.End()
+
 	if c.closed.Load() {
+		recordSpanError(span, ErrClosed)
 		return zero, ErrClosed
 	}
 	sk := c.storeKey(k)
 
 	if v, hit, fatal := c.tryStoreGet(ctx, sk); fatal == nil && hit {
+		span.SetAttributes(attrHit.Bool(true))
+		if errors.Is(v.err, ErrNotFound) {
+			span.SetAttributes(attrNotFound.Bool(true))
+		}
 		return v.value, v.err
 	}
-	return c.loadOne(ctx, k, sk)
+	span.SetAttributes(attrHit.Bool(false))
+	v, err := c.loadOne(ctx, k, sk)
+	if errors.Is(err, ErrNotFound) {
+		span.SetAttributes(attrNotFound.Bool(true))
+	}
+	recordSpanError(span, err)
+	return v, err
 }
 
 // MGet 批量读取。返回 map 中只包含命中正向值的 key;
@@ -121,7 +148,12 @@ func (c *Cache[K, V]) MGet(ctx context.Context, ks ...K) (map[K]V, error) {
 	if len(ks) == 0 {
 		return map[K]V{}, nil
 	}
+	ctx, span := c.tracer.Start(ctx, "dbcache.MGet",
+		trace.WithAttributes(attrCacheName.String(c.name), attrKeysCount.Int(len(ks))))
+	defer span.End()
+
 	if c.closed.Load() {
+		recordSpanError(span, ErrClosed)
 		return nil, ErrClosed
 	}
 
@@ -140,17 +172,21 @@ func (c *Cache[K, V]) MGet(ctx context.Context, ks ...K) (map[K]V, error) {
 	var (
 		missingKeys []K
 		missingSKs  []string
+		hitsCount   int
+		missesCount int
 	)
 	for i, k := range ks {
 		sk := skList[i]
 		item, ok := storeHit[sk]
 		if !ok {
 			c.metrics.Miss(c.name)
+			missesCount++
 			missingKeys = append(missingKeys, k)
 			missingSKs = append(missingSKs, sk)
 			continue
 		}
 		c.metrics.Hit(c.name)
+		hitsCount++
 		if item.NotFound {
 			continue // 已知不存在,跳过
 		}
@@ -164,34 +200,54 @@ func (c *Cache[K, V]) MGet(ctx context.Context, ks ...K) (map[K]V, error) {
 		}
 		result[k] = v
 	}
+	span.SetAttributes(attrHitsCount.Int(hitsCount), attrMissesCount.Int(missesCount))
 
 	if len(missingKeys) == 0 {
 		return result, nil
 	}
 
+	var loadErr error
 	if c.batchLoader != nil {
-		return c.loadBatch(ctx, missingKeys, missingSKs, result)
+		result, loadErr = c.loadBatch(ctx, missingKeys, missingSKs, result)
+	} else {
+		result, loadErr = c.loadEach(ctx, missingKeys, missingSKs, result)
 	}
-	return c.loadEach(ctx, missingKeys, missingSKs, result)
+	recordSpanError(span, loadErr)
+	return result, loadErr
 }
 
 // Set 主动写入(覆盖式),通常只在显式更新场景使用;
 // 一般业务读路径靠 Get 自动回源即可,不需要手动 Set。
 func (c *Cache[K, V]) Set(ctx context.Context, k K, v V) error {
+	ctx, span := c.tracer.Start(ctx, "dbcache.Set", trace.WithAttributes(attrCacheName.String(c.name)))
+	defer span.End()
+
 	if c.closed.Load() {
+		recordSpanError(span, ErrClosed)
 		return ErrClosed
 	}
 	data, err := c.codec.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("dbcache: marshal: %w", err)
+		err = fmt.Errorf("dbcache: marshal: %w", err)
+		recordSpanError(span, err)
+		return err
 	}
-	return c.store.Set(ctx, c.storeKey(k), Item{Value: data}, c.jitterDuration(c.ttl))
+	if err := c.store.Set(ctx, c.storeKey(k), Item{Value: data}, c.jitterDuration(c.ttl)); err != nil {
+		recordSpanError(span, err)
+		return err
+	}
+	return nil
 }
 
 // Delete 显式失效。同时清掉 singleflight 中飞行的 in-flight 项,
 // 避免 DB 已更新但本进程仍读到旧 loader 结果。
 func (c *Cache[K, V]) Delete(ctx context.Context, ks ...K) error {
+	ctx, span := c.tracer.Start(ctx, "dbcache.Delete",
+		trace.WithAttributes(attrCacheName.String(c.name), attrKeysCount.Int(len(ks))))
+	defer span.End()
+
 	if c.closed.Load() {
+		recordSpanError(span, ErrClosed)
 		return ErrClosed
 	}
 	if len(ks) == 0 {
@@ -202,13 +258,22 @@ func (c *Cache[K, V]) Delete(ctx context.Context, ks ...K) error {
 		sks[i] = c.storeKey(k)
 		c.sf.Forget(sks[i])
 	}
-	return c.store.Delete(ctx, sks...)
+	if err := c.store.Delete(ctx, sks...); err != nil {
+		recordSpanError(span, err)
+		return err
+	}
+	return nil
 }
 
 // Warm 预热:对一批 key 触发 MGet,把数据加进 Store。
 // 不返回数据,仅返回错误用于诊断。
 func (c *Cache[K, V]) Warm(ctx context.Context, ks []K) error {
+	ctx, span := c.tracer.Start(ctx, "dbcache.Warm",
+		trace.WithAttributes(attrCacheName.String(c.name), attrKeysCount.Int(len(ks))))
+	defer span.End()
+
 	_, err := c.MGet(ctx, ks...)
+	recordSpanError(span, err)
 	return err
 }
 
@@ -264,17 +329,23 @@ func (c *Cache[K, V]) tryStoreGet(ctx context.Context, sk string) (storeRead[V],
 func (c *Cache[K, V]) loadOne(ctx context.Context, k K, sk string) (V, error) {
 	var zero V
 	val, err, _ := c.sf.Do(sk, func() (any, error) {
+		ctx, span := c.tracer.Start(ctx, "dbcache.Loader",
+			trace.WithAttributes(attrCacheName.String(c.name), attrKeysCount.Int(1)))
+		defer span.End()
+
 		start := time.Now()
 		v, lerr := c.loader(ctx, k)
 		c.metrics.LoadDuration(c.name, time.Since(start), lerr)
 
 		if errors.Is(lerr, ErrNotFound) {
+			span.SetAttributes(attrNotFound.Bool(true))
 			if setErr := c.store.Set(ctx, sk, Item{NotFound: true}, c.jitterDuration(c.negTtl)); setErr != nil {
 				c.logger.Warn().Err(setErr).Str("key", sk).Msg("dbcache: store set negative failed")
 			}
 			return zero, ErrNotFound
 		}
 		if lerr != nil {
+			recordSpanError(span, lerr)
 			return zero, lerr
 		}
 
@@ -296,10 +367,15 @@ func (c *Cache[K, V]) loadOne(ctx context.Context, k K, sk string) (V, error) {
 
 // loadBatch 走 BatchLoader 一次性拉缺失 keys,把结果写入 into 并写回 Store。
 func (c *Cache[K, V]) loadBatch(ctx context.Context, ks []K, sks []string, into map[K]V) (map[K]V, error) {
+	ctx, span := c.tracer.Start(ctx, "dbcache.Loader",
+		trace.WithAttributes(attrCacheName.String(c.name), attrKeysCount.Int(len(ks))))
+	defer span.End()
+
 	start := time.Now()
 	found, err := c.batchLoader(ctx, ks)
 	c.metrics.LoadDuration(c.name, time.Since(start), err)
 	if err != nil {
+		recordSpanError(span, err)
 		return into, err
 	}
 
@@ -382,4 +458,15 @@ func (c *Cache[K, V]) jitterDuration(base time.Duration) time.Duration {
 	delta := float64(base) * c.jitter
 	offset := delta * (rand.Float64()*2 - 1) // [-delta, +delta]
 	return base + time.Duration(offset)
+}
+
+// recordSpanError 把非 ErrNotFound 错误记到 span 上。
+// ErrNotFound 是预期路径(数据源就没有该 key),不应被标记为 error 状态,
+// 让上层调用方需要区分预期 miss 与真错时不被噪声干扰。
+func recordSpanError(span trace.Span, err error) {
+	if err == nil || errors.Is(err, ErrNotFound) {
+		return
+	}
+	span.RecordError(err)
+	span.SetStatus(codes.Error, err.Error())
 }

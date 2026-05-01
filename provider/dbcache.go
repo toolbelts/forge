@@ -26,6 +26,10 @@ const dbcacheDefaultRedisName = "default"
 //     存储类型由 dbcache.<name>.store 决定:memory(默认) / redis / tiered。
 //   - 不向容器注册 *Cache,Cache 是泛型类型由业务方在自己代码里 dbcache.NewBun 等构造,
 //     这里只提供 Store 编排能力。
+//   - 可观测性默认是 noop,业务想接 OTel 显式 dbcache.WithMetrics(dbcache.NewOTelMetrics())
+//     / dbcache.WithTracer(dbcache.NewOTelTracer())。两个工厂内部走全局
+//     otel.MeterProvider / TracerProvider,与 metrics.enabled / trace.enabled 联动,
+//     未启用时是 noop。
 type DbcacheProvider struct {
 	stores map[string]dbcache.Store
 }

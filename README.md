@@ -25,6 +25,7 @@
 |---|---|
 | [`accesslog`](./accesslog/) | gRPC 一元 / 流式访问日志拦截器,字段命名下划线风格,err 已被上层归一化为 `errkit.Error` |
 | [`cron`](./cron/) | `robfig/cron/v3` 薄封装。默认 `SkipIfStillRunning + Recover`,6 字段秒级表达式 |
+| [`dbcache`](./dbcache/) | 数据库缓存(cache-aside),后端可选 memory/redis/tiered;singleflight 防击穿、负缓存防穿透;`NewBun` 自动反射主键 |
 | [`jobqueue`](./jobqueue/) | Redis `LIST + BRPOP/BLMPOP` 极简任务队列,at-most-once;反射推断 handler 入参类型 |
 | [`lock`](./lock/) | Redis 分布式互斥锁,fence token + TTL 自动续租,加 / 续 / 解锁均走原子 Lua |
 | [`message`](./message/) | 邮件(SMTP / SendGrid)+ 短信(Twilio / BytePlus / Aliyun)多后端路由,per-recipient 优先级 fallback,html 模板自动转义 |

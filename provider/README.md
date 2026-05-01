@@ -60,7 +60,8 @@ LIFO Shutdown 自动反向,无需手动管理。
 | 10 | `LockProvider` | 分布式锁工厂(Setup 时取 Redis 客户端,顺序无强约束) |
 | 11 | `CronProvider` | 定时任务调度器 |
 | 12 | `JobQueueProvider` | redis 任务队列。**Register** 阶段就调 `MustGetRedis`,所以必须在 `RedisProvider` 之后 |
-| 13 | `MessageProvider` | 邮件 / 短信路由,无外部依赖 |
+| 13 | `DbcacheProvider` | 数据库缓存 Store 工厂。redis / tiered 后端 **Register** 阶段调 `GetRedis`,所以必须在 `RedisProvider` 之后 |
+| 14 | `MessageProvider` | 邮件 / 短信路由,无外部依赖 |
 
 ### C. gRPC 拦截器(按链外→内顺序 Use,**全部放在 GrpcProvider 之前**)
 
@@ -68,12 +69,12 @@ LIFO Shutdown 自动反向,无需手动管理。
 
 | # | Provider | 拦截器位置 | 说明 |
 |---|---|---|---|
-| 14 | `RecoveryProvider` | 最外层 | 必须最先 recover panic,异步推送告警。Setup 读 `MustGetNotifier` |
-| 15 | `AccessLogProvider` | 内一层 | 看到的 err 已被 Recovery 兜底成 `errkit.Error` |
-| 16 | `ErrorProvider` | 内二层 | 把裸 error / `context.*` / `status.Status` 归一化为 `errkit.Error` |
-| 17 | `RateLimitProvider` | 内三层 | Setup 同时构造 `*RedisRateLimiter` 实例 + 挂拦截器。在 protovalidate 之前砍 CPU |
-| 18 | `ValidateProvider` | 内四层 | protovalidate,纯内存 CEL |
-| 19 | `TokenProvider` | 最内层 | Setup 同时构造 `*token.Manager` 实例 + 挂拦截器。鉴权要查 Redis,放最后让畸形请求先被前面砍掉 |
+| 15 | `RecoveryProvider` | 最外层 | 必须最先 recover panic,异步推送告警。Setup 读 `MustGetNotifier` |
+| 16 | `AccessLogProvider` | 内一层 | 看到的 err 已被 Recovery 兜底成 `errkit.Error` |
+| 17 | `ErrorProvider` | 内二层 | 把裸 error / `context.*` / `status.Status` 归一化为 `errkit.Error` |
+| 18 | `RateLimitProvider` | 内三层 | Setup 同时构造 `*RedisRateLimiter` 实例 + 挂拦截器。在 protovalidate 之前砍 CPU |
+| 19 | `ValidateProvider` | 内四层 | protovalidate,纯内存 CEL |
+| 20 | `TokenProvider` | 最内层 | Setup 同时构造 `*token.Manager` 实例 + 挂拦截器。鉴权要查 Redis,放最后让畸形请求先被前面砍掉 |
 
 > 即使不启用 gRPC,`InterceptorChain` 也是在 `GrpcProvider.Register` 阶段创建的 — 所以 `GrpcProvider` 必须 Use(可以 `enabled=false`),否则 ioc.MustGet 会 panic。
 
@@ -81,17 +82,17 @@ LIFO Shutdown 自动反向,无需手动管理。
 
 | # | Provider | 说明 |
 |---|---|---|
-| 20 | `GrpcProvider` | `Register` 抢端口 + 注入 `*InterceptorChain`;`Setup` 阶段读 chain 构造 `*grpc.Server`。**所有拦截器 Provider 必须 Use 在它之前** |
-| 21 | `HttpProvider` | `*http.ServeMux` 注入容器 |
-| 22 | `PprofProvider` | 复用 HttpProvider 的 mux,仅当 `pprof.enabled && http.enabled` 才挂 |
-| 23 | `GatewayProvider` | grpc-gateway,反向 dial gRPC 后端 |
-| 24 | `TcpProvider` | 通用 TCP accept loop,业务方通过 `MustSetTcpHandler(ctx, h)` 注入 `TcpHandler` |
+| 21 | `GrpcProvider` | `Register` 抢端口 + 注入 `*InterceptorChain`;`Setup` 阶段读 chain 构造 `*grpc.Server`。**所有拦截器 Provider 必须 Use 在它之前** |
+| 22 | `HttpProvider` | `*http.ServeMux` 注入容器 |
+| 23 | `PprofProvider` | 复用 HttpProvider 的 mux,仅当 `pprof.enabled && http.enabled` 才挂 |
+| 24 | `GatewayProvider` | grpc-gateway,反向 dial gRPC 后端 |
+| 25 | `TcpProvider` | 通用 TCP accept loop,业务方通过 `MustSetTcpHandler(ctx, h)` 注入 `TcpHandler` |
 
 ### E. 注册中心(按需)
 
 | # | Provider | 说明 |
 |---|---|---|
-| 25 | `RegistryProvider` | `Setup` 阶段读 `MustGetGrpcListener` 的实际端口注册当前实例。同时全局注册 `redis://` resolver,供 client 端 `grpc.NewClient("redis:///<service>")` 解析 |
+| 26 | `RegistryProvider` | `Setup` 阶段读 `MustGetGrpcListener` 的实际端口注册当前实例。同时全局注册 `redis://` resolver,供 client 端 `grpc.NewClient("redis:///<service>")` 解析 |
 
 ---
 
@@ -324,6 +325,21 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 
 业务方在自己的 `Setup` 里 `MustGetJobQueue(ctx).Subscribe(topic, fn)`。
 
+### DbcacheProvider — `dbcache.<name>.*`
+
+每个 `<name>` 是一个独立的 `dbcache.Store`(memory / redis / tiered),按 name 注入容器,业务方通过 `MustGetDbcacheStore(ctx, "<name>")` 获取后传给 `dbcache.NewBun[K,V](db, dbcache.WithStore(store))`。Provider 不直接构造泛型 `*Cache[K, V]`,Cache 的生命周期由业务方掌握。
+
+| 键 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `store` | string | `memory` | `memory` / `redis` / `tiered` |
+| `size` | int | `100000` | LRU 容量上限,`memory` / `tiered` 用 |
+| `redis` | string | `default` | redis 实例名,`redis` / `tiered` 用 |
+| `key_prefix` | string | — | Redis key 前缀,`redis` / `tiered` 用,多 cache 共享同一 Redis 时务必区分 |
+
+`memory` 后端无外部依赖,`Shutdown` 时 `Purge` 清空 LRU;`redis` / `tiered` 的 Redis 客户端由 `RedisProvider` 统一管理,Dbcache 的 `Shutdown` 不再 Close redis client。
+
+> **失效**:dbcache 不实装跨进程广播,多实例下 L1 靠 TTL 自然收敛。业务方写后失效仍由自家 model 的 bun `AfterUpdate/AfterDelete` hook 调 `cache.Delete`。
+
 ### AccessLogProvider — `accesslog.*`
 
 | 键 | 类型 | 默认值 | 说明 |
@@ -436,13 +452,14 @@ func main() {
         &provider.NotifyProvider{},
     ))
 
-    // B. 数据层(JobQueue 必须在 Redis 之后)
+    // B. 数据层(JobQueue / Dbcache 必须在 Redis 之后)
     must(app.Use(
         &provider.RedisProvider{},
         &provider.DatabaseProvider{},
         &provider.LockProvider{},
         &provider.CronProvider{},
         &provider.JobQueueProvider{},
+        &provider.DbcacheProvider{},
         &provider.MessageProvider{},
     ))
 
@@ -603,6 +620,7 @@ notify:
 | `*lock.Manager` | `provider.MustGetLockManager(ctx)` | lock.enabled=true |
 | `*cron.Cron` | `provider.MustGetCron(ctx)` | cron.enabled=true |
 | `*jobqueue.Queue` | `provider.MustGetJobQueue(ctx)` | jobqueue.enabled=true |
+| `dbcache.Store` | `provider.MustGetDbcacheStore(ctx, "default")` | 实例名按 yaml `dbcache.<name>` |
 | `*message.Manager` | `provider.MustGetMessageManager(ctx)` | message.email/sms.enabled=true |
 | `notify.Notifier` | `provider.MustGetNotifier(ctx)` | 始终存在,空配置走 noop |
 | `*metricSdk.MeterProvider` | `provider.MustGetMeterProvider(ctx)` | metrics.enabled=true |
@@ -619,7 +637,7 @@ notify:
 - **`enabled=false` 与 `MustGet`**:`CronProvider`/`JobQueueProvider`/`LockProvider` 等关闭时不向容器注入实例,业务方调 `MustGet` 直接 panic。这是有意为之 —— 关闭某能力时不应允许业务方依赖它
 - **`viper.GetBool` / `GetInt` 在键缺失时返回零值**:对默认值非零的开关(`token.refresh_rotation` 默认 true、`lock.retry` 默认非零)必须用 `v.IsSet(...)` 守卫,否则会被误关
 - **Metrics / Trace 时序**:必须 Use 在 Redis/Database/Gateway 之前。后三者的 Register 阶段挂 `redisotel.InstrumentTracing` / `bunotel.NewQueryHook` / `otelgrpc.NewClientHandler`,需要全局 MeterProvider/TracerProvider 已就绪。`GrpcProvider` 的 otelgrpc handler 在 Setup 阶段才装,顺序无强约束(Setup 永远晚于所有 Register)
-- **JobQueue 必须在 Redis 之后**:JobQueue 在 Register(不是 Setup)就调 `MustGetRedis`,所以必须在 RedisProvider 之后 Use
+- **JobQueue / Dbcache(redis|tiered)必须在 Redis 之后**:它们在 Register 阶段就调 `(Must)GetRedis`,所以必须排在 RedisProvider 之后 Use。Dbcache 的 `memory` 后端无此约束
 - **InterceptorChain 总要 Use**:即使不开 gRPC,`GrpcProvider` 也要 Use(可以 `grpc.enabled=false`),它的 Register 阶段创建 chain。否则拦截器 Provider 在 Setup 时拿不到 chain
 - **`grpc.addr=":0"` + Registry**:支持。RegistryProvider 从 listener 读实际端口,而不是从 `grpc.addr` 字符串解析
 - **`Shutdown` LIFO**:`NotifyProvider` 排第一所以最后 Shutdown,正好给业务 server 关停后再发 "stopped" 通知 — 不要把 `NotifyProvider` 改放后面

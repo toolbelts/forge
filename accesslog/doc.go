@@ -1,0 +1,10 @@
+// Package accesslog 提供 gRPC 一元/流式访问日志拦截器。
+//
+// 使用约定:
+//   - 由 provider/accesslog.go 接入 InterceptorChain
+//   - 注册位置:Recovery 内层、Error 外层。Recovery 已把 panic 转成 errkit.Error,
+//     Error 已把裸 error 归一化,AccessLog 看到的 err 永远满足 errkit.Error 或 nil,
+//     可以稳定通过 errkit.FromError 提取 error_code / error_name。
+//   - 字段命名采用下划线风格(user_id、user_ip、error_code 等),与项目其它日志一致。
+//   - 不做 panic recover、不做 error 归一化、不做限流/鉴权/校验,这些由对应 Provider 各自负责。
+package accesslog

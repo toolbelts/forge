@@ -36,23 +36,24 @@ type simpleError struct {
 }
 
 // New 构造新错误,gRPC code 由 ToGrpcCode(code) 默认推导。
-func New(code Code, message string) *simpleError {
-	return &simpleError{code: code, message: message}
+// code 接受任意 ~int32 类型(errkit.Code、proto 生成的业务码枚举等),内部规范化为 Code 存储。
+func New[C Codeish](code C, message string) *simpleError {
+	return &simpleError{code: Code(code), message: message}
 }
 
 // Newf 同 New,支持 fmt 风格格式化。
-func Newf(code Code, format string, args ...any) *simpleError {
-	return &simpleError{code: code, message: fmt.Sprintf(format, args...)}
+func Newf[C Codeish](code C, format string, args ...any) *simpleError {
+	return &simpleError{code: Code(code), message: fmt.Sprintf(format, args...)}
 }
 
 // Wrap 用 cause 包装新 code/message,链上保留 cause 供 errors.Is/As 查找。
-func Wrap(cause error, code Code, message string) *simpleError {
-	return &simpleError{code: code, message: message, cause: cause}
+func Wrap[C Codeish](cause error, code C, message string) *simpleError {
+	return &simpleError{code: Code(code), message: message, cause: cause}
 }
 
 // Wrapf 同 Wrap,支持 fmt 风格格式化。
-func Wrapf(cause error, code Code, format string, args ...any) *simpleError {
-	return &simpleError{code: code, message: fmt.Sprintf(format, args...), cause: cause}
+func Wrapf[C Codeish](cause error, code C, format string, args ...any) *simpleError {
+	return &simpleError{code: Code(code), message: fmt.Sprintf(format, args...), cause: cause}
 }
 
 // WithMetadata 添加单条元数据,链式调用。
@@ -146,10 +147,10 @@ func FromError(err error) (Error, bool) {
 	return nil, false
 }
 
-// IsCode 判断 err 是否承载指定 code。
-func IsCode(err error, code Code) bool {
+// IsCode 判断 err 是否承载指定 code。code 接受任意 ~int32 类型。
+func IsCode[C Codeish](err error, code C) bool {
 	e, ok := FromError(err)
-	return ok && e.Code() == code
+	return ok && e.Code() == Code(code)
 }
 
 // CodeOf 提取 err 的 Code,无法识别时返回 CodeUnknown。

@@ -34,27 +34,29 @@ var (
 )
 
 // RegisterGrpcCodeMapping 注册业务码到 gRPC code 的映射,可覆盖内置表。
+// c 接受任意 ~int32 类型,内部规范化为 Code 入表。
 //
 // 应用启动时为业务码注入映射:
 //
 //	for code, gc := range bizGrpcMapping {
-//	    errkit.RegisterGrpcCodeMapping(errkit.Code(code), gc)
+//	    errkit.RegisterGrpcCodeMapping(code, gc)
 //	}
-func RegisterGrpcCodeMapping(c Code, gc codes.Code) {
+func RegisterGrpcCodeMapping[C Codeish](c C, gc codes.Code) {
 	grpcCodeMu.Lock()
 	defer grpcCodeMu.Unlock()
-	grpcCodeOverride[c] = gc
+	grpcCodeOverride[Code(c)] = gc
 }
 
 // ToGrpcCode 业务码 → gRPC codes.Code:override 优先,其次内置表,无匹配回 Internal。
-func ToGrpcCode(c Code) codes.Code {
+func ToGrpcCode[C Codeish](c C) codes.Code {
+	key := Code(c)
 	grpcCodeMu.RLock()
-	if gc, ok := grpcCodeOverride[c]; ok {
+	if gc, ok := grpcCodeOverride[key]; ok {
 		grpcCodeMu.RUnlock()
 		return gc
 	}
 	grpcCodeMu.RUnlock()
-	if gc, ok := defaultGrpcCode[c]; ok {
+	if gc, ok := defaultGrpcCode[key]; ok {
 		return gc
 	}
 	return codes.Internal

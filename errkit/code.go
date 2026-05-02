@@ -14,6 +14,13 @@ import (
 //   - 20000+:          应用业务码,每业务模块预留 1000 步进
 type Code int32
 
+// Codeish 一切可被解释为业务错误码的 ~int32 类型。
+// 既覆盖原生 errkit.Code,也覆盖 proto 生成的 int32 枚举(如 errorv1.Code),
+// 让构造与查表函数无须调用方手动 errkit.Code(...) 强转。
+type Codeish interface {
+	~int32
+}
+
 // 系统级码,数值 10001-10015。后续 10100-19999 留给框架扩展。
 const (
 	CodeOK                 Code = 0

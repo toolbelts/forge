@@ -24,13 +24,27 @@ const tokenDefaultRedisName = "default"
 //
 // 流式 RPC:本期不挂载流式拦截器(参考 ValidateProvider 的取舍);
 // 长连接的 token 续期/失效语义需要单独设计,先聚焦 unary。
+//
+// 白名单两档:
+//   - skips         完全跳过 token 校验,handler 收到的 ctx 中 user_id == 0
+//   - optional_skips 软鉴权:命中后,缺 token 或凭证类校验失败均静默降级为
+//                    匿名(handler 收到 user_id == 0),token 有效则正常写
+//                    user_id;Redis/网络等系统错误不被静默,继续透传。
+//                    适用于"既可登录调、也可匿名调"的 RPC(如发送验证码)。
+//
+// 同一 RPC 同时命中 skips 与 optional_skips 时,skips 优先(更宽松,不查 token)。
+//
+// 隐含契约:本拦截器假设 token.Manager 不签发 user_id == 0 的 token,因此
+// user_id == 0 可作为"匿名"的可靠信号。后续若引入 user_id == 0 的合法用户,
+// 需重新设计匿名信号(例如 meta 增设布尔位)。
 type TokenProvider struct {
-	enabled bool
-	skips   map[string]struct{}
-	tm      *token.Manager
+	enabled       bool
+	skips         map[string]struct{}
+	optionalSkips map[string]struct{}
+	tm            *token.Manager
 }
 
-// Register 读 token.enabled 与 token.skips。
+// Register 读 token.enabled / token.skips / token.optional_skips。
 // disabled 时 Setup 直接跳过,不创建 Manager 也不挂拦截器。
 func (p *TokenProvider) Register(ctx context.Context) error {
 	v := MustGetViper(ctx)
@@ -41,6 +55,7 @@ func (p *TokenProvider) Register(ctx context.Context) error {
 	}
 
 	p.skips = meta.BuildSkips(v.GetStringSlice("token.skips"))
+	p.optionalSkips = meta.BuildSkips(v.GetStringSlice("token.optional_skips"))
 	return nil
 }
 
@@ -90,12 +105,13 @@ func (p *TokenProvider) Setup(ctx context.Context) error {
 	ioc.MustInstance(ctx, p.tm)
 
 	chain := ioc.MustGet[*InterceptorChain](ctx)
-	chain.Use(tokenUnaryInterceptor(p.tm, p.skips))
+	chain.Use(tokenUnaryInterceptor(p.tm, p.skips, p.optionalSkips))
 
 	log.Ctx(ctx).Info().
 		Str("provider", "token").
 		Str("redis", redisName).
 		Int("skips", len(p.skips)).
+		Int("optional_skips", len(p.optionalSkips)).
 		Msg("token interceptor registered")
 	return nil
 }
@@ -104,40 +120,57 @@ func (p *TokenProvider) Setup(ctx context.Context) error {
 // 校验 access_token 后把 user_id 写进 meta,业务 handler 通过
 // meta.UserId(ctx) 拿到当前用户。
 //
-// skips 接受 HTTP path(/v1/auth/login)或 gRPC FullMethod(/api.Auth/Login),
-// 任一命中即放行。直连 gRPC 入口若需要放行,把 FullMethod 写进 token.skips 即可。
+// skips / optional_skips 都接受 HTTP path(/v1/auth/login)或 gRPC FullMethod
+// (/api.Auth/Login),任一命中即放行。直连 gRPC 入口若需要放行,把 FullMethod
+// 写进对应名单即可。两个名单同时命中时 skips 优先(更宽松,不查 token)。
 //
 // 错误映射(统一对外暴露 UNAUTHENTICATED,前端只需一个"重新登录"分支):
-//   - 缺 token / 不存在 / 过期 / 载荷损坏  → UNAUTHENTICATED
+//   - 缺 token / 不存在 / 过期 / 载荷损坏  → UNAUTHENTICATED(strict 模式)
+//                                          → 匿名放行(optional 模式)
 //   - 其它(Redis/网络等)                   → 透传给 ErrorProvider 归一化为 INTERNAL
+//                                          (无论 strict 还是 optional 都不静默)
 //
 // 真实 token 失败原因仍通过 WithCause 挂在 BizError 上,服务端日志可排查,但不向客户端暴露。
-func tokenUnaryInterceptor(tm *token.Manager, skips map[string]struct{}) grpc.UnaryServerInterceptor {
+func tokenUnaryInterceptor(
+	tm *token.Manager,
+	skips, optionalSkips map[string]struct{},
+) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		if meta.MatchSkips(ctx, skips) {
 			return handler(ctx, req)
 		}
+
+		optional := meta.MatchSkips(ctx, optionalSkips)
 
 		rm := meta.Request(ctx)
 		logger := log.Ctx(ctx).With().
 			Str("full_method", info.FullMethod).
 			Str("http_method", rm.Method).
 			Str("http_path", rm.Path).
+			Bool("optional", optional).
 			Logger()
 
 		accessToken := rm.Token
 		if accessToken == "" {
+			if optional {
+				logger.Debug().Msg("token optional: no token, anonymous pass")
+				return handler(ctx, req)
+			}
 			logger.Info().Msg("token auth rejected: missing token")
 			return nil, errkit.New(errkit.CodeUnauthenticated, "unauthenticated")
 		}
 
 		tk, err := tm.Validate(ctx, accessToken)
 		if err != nil {
+			credErr := errors.Is(err, token.ErrTokenNotFound) ||
+				errors.Is(err, token.ErrEmptyToken) ||
+				errors.Is(err, token.ErrTokenExpired) ||
+				errors.Is(err, token.ErrTokenCorrupted)
 			switch {
-			case errors.Is(err, token.ErrTokenNotFound),
-				errors.Is(err, token.ErrEmptyToken),
-				errors.Is(err, token.ErrTokenExpired),
-				errors.Is(err, token.ErrTokenCorrupted):
+			case credErr && optional:
+				logger.Debug().Err(err).Msg("token optional: invalid token, anonymous pass")
+				return handler(ctx, req)
+			case credErr:
 				logger.Info().Err(err).Msg("token auth rejected")
 				return nil, errkit.New(errkit.CodeUnauthenticated, "unauthenticated").WithCause(err)
 			default:

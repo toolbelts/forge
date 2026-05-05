@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	json "github.com/goccy/go-json"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel/trace"
@@ -19,6 +20,9 @@ import (
 
 // truncatedSuffix 在 payload 摘要被字节级截断后追加,提示日志查看者尾部已被裁剪。
 const truncatedSuffix = "...[truncated]"
+
+// maskPlaceholder 命中 mask 字段后的替换值。固定 "***",不开放配置避免无意义的样式分歧。
+const maskPlaceholder = "***"
 
 // payloadMarshaler 复用的 protojson 序列化配置。
 // UseProtoNames 让字段名与 proto 定义一致便于日志检索;
@@ -34,6 +38,7 @@ type options struct {
 	payloadMaxBytes int
 	slowThreshold   time.Duration
 	skips           map[string]struct{}
+	maskFields      map[string]struct{}
 }
 
 // defaultOptions 给出未显式配置时的默认参数。
@@ -73,6 +78,29 @@ func WithSlowThreshold(d time.Duration) Option {
 func WithSkips(items []string) Option {
 	return func(o *options) {
 		o.skips = meta.BuildSkips(items)
+	}
+}
+
+// WithMaskFields 把 protojson 摘要中匹配 fields 的字段值替换为 "***"。
+// fields 走精确等值匹配(不做 prefix/suffix),建议传 proto 字段名(snake_case),
+// 与 payloadMarshaler.UseProtoNames=true 保持一致。空列表 / nil 时不启用脱敏。
+// 仅作用于 proto.Message 分支;非 proto 兜底走 fmt.Sprint 不做脱敏。
+func WithMaskFields(fields []string) Option {
+	return func(o *options) {
+		if len(fields) == 0 {
+			return
+		}
+		m := make(map[string]struct{}, len(fields))
+		for _, f := range fields {
+			if f == "" {
+				continue
+			}
+			m[f] = struct{}{}
+		}
+		if len(m) == 0 {
+			return
+		}
+		o.maskFields = m
 	}
 }
 
@@ -120,9 +148,9 @@ func UnaryInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 			Str("language", rm.Language)
 		addConditionalFields(evt, ctx)
 		if o.payload {
-			evt.Str("req", marshalPayload(req, o.payloadMaxBytes))
+			evt.Str("req", marshalPayload(req, o.payloadMaxBytes, o.maskFields))
 			if err == nil {
-				evt.Str("resp", marshalPayload(resp, o.payloadMaxBytes))
+				evt.Str("resp", marshalPayload(resp, o.payloadMaxBytes, o.maskFields))
 			}
 		}
 		addErrorFields(evt, err)
@@ -255,8 +283,9 @@ func splitFullMethod(full string) (service, method string) {
 // marshalPayload 把 req/resp 序列化为日志摘要。
 // proto.Message 走 protojson(typed nil 由 protojson 自身兜底返回 "{}");
 // 非 proto 用 fmt.Sprint 兜底,避免在拦截器里 panic;
-// 超过 maxBytes 字节先按字节截断,再 ToValidUTF8 修掉半个 rune,最后追加 truncatedSuffix。
-func marshalPayload(v any, maxBytes int) string {
+// mask 仅作用于 proto.Message 分支(JSON 结构已知);非 proto 兜底无 schema 不脱敏。
+// 顺序:protojson → applyMask → truncate(先 mask 再截断,避免被截断撕裂的 JSON 前缀漏字段)。
+func marshalPayload(v any, maxBytes int, mask map[string]struct{}) string {
 	if v == nil {
 		return ""
 	}
@@ -266,11 +295,49 @@ func marshalPayload(v any, maxBytes int) string {
 		if err != nil {
 			return fmt.Sprintf("<marshal error: %v>", err)
 		}
+		if len(mask) > 0 {
+			buf = applyMask(buf, mask)
+		}
 		s = string(buf)
 	} else {
 		s = fmt.Sprint(v)
 	}
 	return truncate(s, maxBytes)
+}
+
+// applyMask 对 protojson 输出做字段级脱敏:解析为通用 JSON 树,递归替换命中 mask 的 key 的 value
+// 为 "***",再重新序列化。任何 unmarshal/marshal 失败都直接返回原 buf(best-effort,不阻塞日志)。
+// 仅替换非 nil 叶子值;遇到 null 保持不动避免类型变形。
+func applyMask(buf []byte, mask map[string]struct{}) []byte {
+	var root any
+	if err := json.Unmarshal(buf, &root); err != nil {
+		return buf
+	}
+	maskWalk(root, mask)
+	out, err := json.Marshal(root)
+	if err != nil {
+		return buf
+	}
+	return out
+}
+
+// maskWalk 递归遍历 JSON 树,命中 mask 的 map key 且 value 非 nil 时原地替换为占位符。
+// 数组元素递归下钻;其它叶子节点不动。
+func maskWalk(v any, mask map[string]struct{}) {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, vv := range x {
+			if _, hit := mask[k]; hit && vv != nil {
+				x[k] = maskPlaceholder
+				continue
+			}
+			maskWalk(vv, mask)
+		}
+	case []any:
+		for _, vv := range x {
+			maskWalk(vv, mask)
+		}
+	}
 }
 
 // truncate 按字节级裁剪,保留 UTF-8 完整 rune 后追加截断标记。

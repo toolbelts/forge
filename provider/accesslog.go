@@ -44,11 +44,13 @@ func (p *AccessLogProvider) Setup(ctx context.Context) error {
 	payloadMaxBytes := v.GetInt("accesslog.payload_max_bytes")
 	slowThreshold := v.GetDuration("accesslog.slow_threshold")
 	skips := v.GetStringSlice("accesslog.skips")
+	maskFields := v.GetStringSlice("accesslog.mask_fields")
 
 	opts := []accesslog.Option{
 		accesslog.WithPayload(payload, payloadMaxBytes),
 		accesslog.WithSlowThreshold(slowThreshold),
 		accesslog.WithSkips(skips),
+		accesslog.WithMaskFields(maskFields),
 	}
 
 	chain := ioc.MustGet[*InterceptorChain](ctx)
@@ -61,6 +63,7 @@ func (p *AccessLogProvider) Setup(ctx context.Context) error {
 		Int("payload_max_bytes", payloadMaxBytes).
 		Dur("slow_threshold", slowThreshold).
 		Int("skips", len(skips)).
+		Int("mask_fields", len(maskFields)).
 		Msg("accesslog interceptor registered")
 	return nil
 }

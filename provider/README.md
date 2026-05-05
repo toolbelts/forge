@@ -356,6 +356,7 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 | `payload_max_bytes` | int | `accesslog` 包默认 | payload 截断阈值 |
 | `slow_threshold` | duration | `accesslog` 包默认 | 超过此值标记 slow 字段 |
 | `skips` | []string | — | path / FullMethod 白名单 |
+| `mask_fields` | []string | — | protojson 摘要中精确匹配 key 名替换为 `"***"`,典型如 `password` / `old_password` / `*_token` |
 
 ### ValidateProvider / RecoveryProvider / ErrorProvider
 

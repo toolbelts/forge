@@ -581,3 +581,121 @@ func TestTruncate(t *testing.T) {
 		}
 	}
 }
+
+// TestApplyMask 表格驱动覆盖脱敏的核心场景:命中替换、嵌套、数组、null 保持、空 mask、非命中。
+func TestApplyMask(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		mask []string
+		want string
+	}{
+		{
+			name: "top_level_hit",
+			in:   `{"password":"p","email":"a@b.c"}`,
+			mask: []string{"password"},
+			want: `{"email":"a@b.c","password":"***"}`,
+		},
+		{
+			name: "nested_hit",
+			in:   `{"profile":{"password":"p","name":"x"}}`,
+			mask: []string{"password"},
+			want: `{"profile":{"name":"x","password":"***"}}`,
+		},
+		{
+			name: "array_of_objects",
+			in:   `{"items":[{"password":"a"},{"password":"b"}]}`,
+			mask: []string{"password"},
+			want: `{"items":[{"password":"***"},{"password":"***"}]}`,
+		},
+		{
+			name: "null_preserved",
+			in:   `{"password":null}`,
+			mask: []string{"password"},
+			want: `{"password":null}`,
+		},
+		{
+			name: "non_match_unchanged",
+			in:   `{"email":"a@b.c","user_id":1}`,
+			mask: []string{"password"},
+			want: `{"email":"a@b.c","user_id":1}`,
+		},
+		{
+			name: "multiple_keys",
+			in:   `{"old_password":"o","new_password":"n","keep":"v"}`,
+			mask: []string{"old_password", "new_password"},
+			want: `{"keep":"v","new_password":"***","old_password":"***"}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			set := make(map[string]struct{}, len(tc.mask))
+			for _, k := range tc.mask {
+				set[k] = struct{}{}
+			}
+			got := applyMask([]byte(tc.in), set)
+			// 用 unmarshal 回 map 比较,绕开 key 顺序差异。
+			var gotV, wantV any
+			if err := json.Unmarshal(got, &gotV); err != nil {
+				t.Fatalf("unmarshal got: %v (raw=%s)", err, got)
+			}
+			if err := json.Unmarshal([]byte(tc.want), &wantV); err != nil {
+				t.Fatalf("unmarshal want: %v", err)
+			}
+			gotJ, _ := json.Marshal(gotV)
+			wantJ, _ := json.Marshal(wantV)
+			if string(gotJ) != string(wantJ) {
+				t.Errorf("got=%s want=%s", gotJ, wantJ)
+			}
+		})
+	}
+}
+
+// TestApplyMask_MalformedJsonPassthrough 非法 JSON 时返回原 buf,不阻塞日志主链路。
+func TestApplyMask_MalformedJsonPassthrough(t *testing.T) {
+	in := []byte(`{"password":`)
+	mask := map[string]struct{}{"password": {}}
+	got := applyMask(in, mask)
+	if string(got) != string(in) {
+		t.Errorf("got=%q want=%q", got, in)
+	}
+}
+
+// TestUnaryInterceptor_MaskFields 集成路径:WithMaskFields 配置后,protojson 摘要的命中字段被替换为 "***"。
+// 这里借用 *statuspb.Status 的 message 字段做集成验证 — 不引入新 proto 依赖。
+func TestUnaryInterceptor_MaskFields(t *testing.T) {
+	c, ctx := newCapture(t)
+	interceptor := UnaryInterceptor(WithPayload(true, 0), WithMaskFields([]string{"message"}))
+	info := &grpc.UnaryServerInfo{FullMethod: "/svc.Foo/Bar"}
+	req := &statuspb.Status{Code: 42, Message: "secret-payload"}
+	handler := func(ctx context.Context, _ any) (any, error) { return req, nil }
+	_, _ = interceptor(ctx, req, info, handler)
+
+	e := c.only(t)
+	reqStr, _ := e["req"].(string)
+	if strings.Contains(reqStr, "secret-payload") {
+		t.Errorf("req leaked masked value: %q", reqStr)
+	}
+	if !strings.Contains(reqStr, `"message":"***"`) {
+		t.Errorf("req missing masked placeholder: %q", reqStr)
+	}
+	if !strings.Contains(reqStr, `"code":42`) {
+		t.Errorf("req lost non-masked field code: %q", reqStr)
+	}
+}
+
+// TestUnaryInterceptor_MaskFields_EmptyNoOp 空 mask 列表时 payload 与未启用一致(快速路径)。
+func TestUnaryInterceptor_MaskFields_EmptyNoOp(t *testing.T) {
+	c, ctx := newCapture(t)
+	interceptor := UnaryInterceptor(WithPayload(true, 0), WithMaskFields(nil))
+	info := &grpc.UnaryServerInfo{FullMethod: "/svc.Foo/Bar"}
+	req := &statuspb.Status{Code: 1, Message: "hi"}
+	handler := func(ctx context.Context, _ any) (any, error) { return req, nil }
+	_, _ = interceptor(ctx, req, info, handler)
+
+	e := c.only(t)
+	reqStr, _ := e["req"].(string)
+	if !strings.Contains(reqStr, `"message":"hi"`) {
+		t.Errorf("empty mask should leave value intact: %q", reqStr)
+	}
+}

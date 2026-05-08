@@ -70,15 +70,7 @@ func (p *GatewayProvider) Register(ctx context.Context) error {
 	p.conn = conn
 
 	p.mux = runtime.NewServeMux(
-		runtime.WithMarshalerOption(runtime.MIMEWildcard, &runtime.JSONPb{
-			MarshalOptions: protojson.MarshalOptions{
-				UseEnumNumbers:    false,
-				EmitDefaultValues: true,
-			},
-			UnmarshalOptions: protojson.UnmarshalOptions{
-				DiscardUnknown: true,
-			},
-		}),
+		runtime.WithMarshalerOption(runtime.MIMEWildcard, gatewayJsonPb()),
 		runtime.WithErrorHandler(GatewayErrorHandler),
 		runtime.WithMetadata(meta.Annotator),
 	)
@@ -138,6 +130,19 @@ func (p *GatewayProvider) Shutdown(ctx context.Context) error {
 		errs = append(errs, fmt.Errorf("gateway grpc conn close: %w", err))
 	}
 	return errors.Join(errs...)
+}
+
+func gatewayJsonPb() *runtime.JSONPb {
+	return &runtime.JSONPb{
+		MarshalOptions: protojson.MarshalOptions{
+			UseProtoNames:     true,
+			UseEnumNumbers:    false,
+			EmitDefaultValues: true,
+		},
+		UnmarshalOptions: protojson.UnmarshalOptions{
+			DiscardUnknown: true,
+		},
+	}
 }
 
 // GetGatewayMux 从容器获取 *runtime.ServeMux。

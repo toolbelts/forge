@@ -232,6 +232,8 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 | `grpc_endpoint` | string | ✓ | gateway → gRPC 后端地址,通常是同进程的 `grpc.addr` |
 | `read_timeout` / `read_header_timeout` / `write_timeout` / `idle_timeout` / `shutdown_timeout` | duration | — | 同 HttpProvider |
 
+JSON 编码固定使用 proto 字段名(`UseProtoNames=true`),枚举输出字符串,默认值输出到响应体。
+
 ### TcpProvider — `tcp.*`
 
 | 键 | 类型 | 必填(enabled 时) | 说明 |

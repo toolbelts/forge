@@ -49,12 +49,19 @@ type Queue struct {
 
 // publishScript LPUSH 后按 max 裁剪,返回 {length_after_trim, dropped}。
 // max=0 时短路掉 LTRIM,行为等同纯 LPUSH。返回数组省一次 LLEN 往返。
+//
+// 触发裁剪时一次性裁到 max/2 (high/low watermark),而不是裁到刚好 max:
+// 若每次只裁 1 条,稳态下每个 Publish 都触发 LTRIM 与 warn 日志,造成日志洪水;
+// 裁到 max/2 后能撑住后续 ~max/2 次 Publish 才再次触发,告警频率降两个量级。
+// 副作用是单次丢弃量更大,但反正已经是消费跟不上的状态,丢得快比丢得慢更能保护 Redis 内存。
 const publishScript = `
 local max = tonumber(ARGV[2])
 local n = redis.call('LPUSH', KEYS[1], ARGV[1])
 if max > 0 and n > max then
-  redis.call('LTRIM', KEYS[1], 0, max - 1)
-  return {max, n - max}
+  local keep = math.floor(max / 2)
+  if keep < 1 then keep = 1 end
+  redis.call('LTRIM', KEYS[1], 0, keep - 1)
+  return {keep, n - keep}
 end
 return {n, 0}
 `
@@ -132,8 +139,9 @@ func (q *Queue) Subscribe(topic string, fn any, opts ...SubscribeOption) error {
 // 不依赖 Start,允许"只生产不消费"的服务调用。
 //
 // 若 topic 配了 max_len 且 LPUSH 后超过上限,会通过 LTRIM 原子裁掉最老消息
-// (FIFO 角度:即将被消费的那一端);被丢弃的数量通过 Metrics.PublishDropped 上报,
-// Publish 本身仍返回 nil —— 这是预期行为,业务通过指标告警感知。
+// (FIFO 角度:即将被消费的那一端),且一次裁到 max/2 而非 max,以避免稳态日志洪水;
+// 被丢弃的数量通过 Metrics.PublishDropped 上报,Publish 本身仍返回 nil —— 这是
+// 预期行为,业务通过指标告警感知。
 //
 // args 中的 []byte 会被 json.Marshal 编为 base64 字符串,业务方自行权衡。
 func (q *Queue) Publish(ctx context.Context, topic string, args ...any) error {
@@ -167,7 +175,8 @@ func (q *Queue) Publish(ctx context.Context, topic string, args ...any) error {
 			Str("topic", topic).
 			Int("max_len", maxLen).
 			Int64("dropped", dropped).
-			Msg("jobqueue: queue overflow, oldest messages trimmed")
+			Int64("kept", length).
+			Msg("jobqueue: queue overflow, oldest messages trimmed to half-watermark")
 	}
 	return nil
 }

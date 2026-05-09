@@ -478,11 +478,11 @@ func newTestQueueWith(t *testing.T, opts ...QueueOption) (*Queue, *miniredis.Min
 	return q, mr
 }
 
-// TestQueue_PublishMaxLen_TrimsOldest max_len=3,LPUSH 5 条,LIST 应保留最新 3 条。
-// FIFO 角度:消费顺序应为 m3,m4,m5(m1/m2 被丢)。
+// TestQueue_PublishMaxLen_TrimsOldest max_len=4,LPUSH 5 条,触发裁剪后保留 max/2=2 条。
+// FIFO 角度:消费顺序应为 m4,m5(m1..m3 被丢)。
 func TestQueue_PublishMaxLen_TrimsOldest(t *testing.T) {
 	t.Parallel()
-	q, mr := newTestQueueWith(t, WithDefaultMaxLen(3))
+	q, mr := newTestQueueWith(t, WithDefaultMaxLen(4))
 
 	ctx := context.Background()
 	for _, m := range []string{"m1", "m2", "m3", "m4", "m5"} {
@@ -494,9 +494,10 @@ func TestQueue_PublishMaxLen_TrimsOldest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	// LPUSH 把 m5 放头部 → got[0]=m5, got[1]=m4, got[2]=m3。BRPOP 从尾部 → m3,m4,m5。
-	if len(got) != 3 || got[0] != `["m5"]` || got[1] != `["m4"]` || got[2] != `["m3"]` {
-		t.Fatalf("LIST contents = %v, want [m5, m4, m3]", got)
+	// 前 4 条:list=[m4,m3,m2,m1] (LPUSH 头插)。
+	// 第 5 条:n=5>4 → keep=2,trim 后 list=[m5,m4]。BRPOP 尾部 → m4,m5。
+	if len(got) != 2 || got[0] != `["m5"]` || got[1] != `["m4"]` {
+		t.Fatalf("LIST contents = %v, want [m5, m4]", got)
 	}
 }
 
@@ -504,11 +505,12 @@ func TestQueue_PublishMaxLen_TrimsOldest(t *testing.T) {
 func TestQueue_PublishMaxLen_PerTopicOverride(t *testing.T) {
 	t.Parallel()
 	q, mr := newTestQueueWith(t,
-		WithDefaultMaxLen(2),
-		WithTopicMaxLen("big", 5),
+		WithDefaultMaxLen(4),
+		WithTopicMaxLen("big", 10),
 	)
 	ctx := context.Background()
 
+	// big 用 per-topic max=10,push 5 条不触发裁剪。
 	for i := range 5 {
 		if err := q.Publish(ctx, "big", i); err != nil {
 			t.Fatalf("Publish big: %v", err)
@@ -518,16 +520,17 @@ func TestQueue_PublishMaxLen_PerTopicOverride(t *testing.T) {
 		t.Fatal("jq:big missing")
 	}
 	if got, _ := mr.List("jq:big"); len(got) != 5 {
-		t.Fatalf("big LIST len = %d, want 5", len(got))
+		t.Fatalf("big LIST len = %d, want 5 (no trim)", len(got))
 	}
 
+	// small 用 default max=4,push 5 条触发一次裁剪到 keep=2。
 	for i := range 5 {
 		if err := q.Publish(ctx, "small", i); err != nil {
 			t.Fatalf("Publish small: %v", err)
 		}
 	}
 	if got, _ := mr.List("jq:small"); len(got) != 2 {
-		t.Fatalf("small LIST len = %d, want 2 (default)", len(got))
+		t.Fatalf("small LIST len = %d, want 2 (default max=4 → keep max/2=2)", len(got))
 	}
 }
 
@@ -565,49 +568,48 @@ func TestQueue_PublishMaxLen_TopicZeroOverridesDefault(t *testing.T) {
 }
 
 // TestMetrics_PublishCounters 验证 Metrics 在各路径的回调。
+// 用 max=4 (keep=2),前 4 条不触发裁剪,第 5 条触发一次裁剪丢 3 条。
 func TestMetrics_PublishCounters(t *testing.T) {
 	t.Parallel()
 	m := newStubMetrics()
-	q, _ := newTestQueueWith(t, WithDefaultMaxLen(3), WithMetrics(m))
+	q, _ := newTestQueueWith(t, WithDefaultMaxLen(4), WithMetrics(m))
 
 	ctx := context.Background()
-	// 前 3 条不触发 dropped
-	for i := range 3 {
+	// 前 4 条:n 从 1 到 4,均 <= max,不触发 dropped
+	for i := range 4 {
 		if err := q.Publish(ctx, "t", i); err != nil {
 			t.Fatalf("Publish: %v", err)
 		}
 	}
 	m.mu.Lock()
-	if m.publishTotal["t"] != 3 {
-		t.Fatalf("PublishTotal = %d, want 3", m.publishTotal["t"])
+	if m.publishTotal["t"] != 4 {
+		t.Fatalf("PublishTotal = %d, want 4", m.publishTotal["t"])
 	}
 	if m.publishDroppedN != 0 {
 		t.Fatalf("PublishDropped should not be called yet, got %d", m.publishDroppedN)
 	}
-	if m.queueLen["t"] != 3 {
-		t.Fatalf("QueueLength = %d, want 3", m.queueLen["t"])
+	if m.queueLen["t"] != 4 {
+		t.Fatalf("QueueLength = %d, want 4", m.queueLen["t"])
 	}
 	m.mu.Unlock()
 
-	// 第 4、5 条各丢 1 条
-	for _, i := range []int{3, 4} {
-		if err := q.Publish(ctx, "t", i); err != nil {
-			t.Fatalf("Publish: %v", err)
-		}
+	// 第 5 条:n=5>4 → keep=2,一次裁掉 3 条
+	if err := q.Publish(ctx, "t", 4); err != nil {
+		t.Fatalf("Publish: %v", err)
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.publishTotal["t"] != 5 {
 		t.Fatalf("PublishTotal = %d, want 5", m.publishTotal["t"])
 	}
-	if m.publishDropped["t"] != 2 {
-		t.Fatalf("PublishDropped sum = %d, want 2", m.publishDropped["t"])
+	if m.publishDropped["t"] != 3 {
+		t.Fatalf("PublishDropped sum = %d, want 3 (5-keep=2)", m.publishDropped["t"])
 	}
-	if m.publishDroppedN != 2 {
-		t.Fatalf("PublishDropped call count = %d, want 2", m.publishDroppedN)
+	if m.publishDroppedN != 1 {
+		t.Fatalf("PublishDropped call count = %d, want 1 (一次裁到 keep)", m.publishDroppedN)
 	}
-	if m.queueLen["t"] != 3 {
-		t.Fatalf("QueueLength = %d, want 3 (capped)", m.queueLen["t"])
+	if m.queueLen["t"] != 2 {
+		t.Fatalf("QueueLength = %d, want 2 (max/2)", m.queueLen["t"])
 	}
 }
 
@@ -620,5 +622,35 @@ func TestMetrics_NoopDefault(t *testing.T) {
 		if err := q.Publish(ctx, "t", i); err != nil {
 			t.Fatalf("Publish: %v", err)
 		}
+	}
+}
+
+// TestQueue_PublishMaxLen_HalfWatermark 验证稳态下裁剪频率 ~ 1/(max/2),
+// 而不是裁到 max 的"每条 Publish 都触发一次"。max=10,push 21 条:
+//   - push #1..#10: 不触发裁剪
+//   - push #11: n=11>10 → keep=5,丢 6 条 (1 次裁剪)
+//   - push #12..#15: 不触发 (n 从 6 到 9)
+//   - push #16: n=11>10 → keep=5,丢 6 条 (1 次裁剪)
+//   - push #17..#21: 不触发 (n 从 6 到 9)
+//
+// 共 2 次裁剪、丢 12 条;旧策略 (裁到 max) 下 push #11..#21 每条都触发 → 11 次。
+func TestQueue_PublishMaxLen_HalfWatermark(t *testing.T) {
+	t.Parallel()
+	m := newStubMetrics()
+	q, _ := newTestQueueWith(t, WithDefaultMaxLen(10), WithMetrics(m))
+
+	ctx := context.Background()
+	for i := range 21 {
+		if err := q.Publish(ctx, "h", i); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.publishDroppedN != 2 {
+		t.Fatalf("PublishDropped call count = %d, want 2 (half-watermark, 旧策略应为 11)", m.publishDroppedN)
+	}
+	if m.publishDropped["h"] != 12 {
+		t.Fatalf("PublishDropped sum = %d, want 12 (2 次 × 6)", m.publishDropped["h"])
 	}
 }

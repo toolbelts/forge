@@ -10,8 +10,10 @@
 //
 // 容量保护:WithDefaultMaxLen(n) / WithTopicMaxLen(topic, n) 给 LIST 设上限。
 // Publish 在 LPUSH 后通过 LTRIM 原子裁掉最老的消息(默认 0 = 不限),Publish 仍返回 nil。
-// 被丢弃的数量通过 Metrics.PublishDropped 上报,业务应据此配阈值告警 —— 这是消费者宕机
-// 或处理跟不上的核心信号。OTel 接入显式 jobqueue.WithMetrics(jobqueue.NewOTelMetrics())。
+// 触发裁剪时一次裁到 max/2 (high/low watermark),避免稳态下每次 Publish 都触发裁剪
+// 与 warn 日志洪水。被丢弃的数量通过 Metrics.PublishDropped 上报,业务应据此配阈值告警
+// —— 这是消费者宕机或处理跟不上的核心信号。OTel 接入显式
+// jobqueue.WithMetrics(jobqueue.NewOTelMetrics())。
 //
 // fn 必须形如 func(ctx context.Context, ...) error —— 第一个参数固定 context.Context,
 // 出参恰好 1 个 error,其它入参类型任意。Publish 必须按相同顺序传值。

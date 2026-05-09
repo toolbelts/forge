@@ -36,6 +36,10 @@ type Queue struct {
 	client    *redis.Client
 	keyPrefix string
 
+	defaultMaxLen int            // 0 = 不限
+	topicMaxLen   map[string]int // 每 topic 覆盖,优先级高于 default;0 表示该 topic 不限
+	metrics       Metrics
+
 	mu       sync.Mutex          // 保护 handlers + cancel
 	handlers map[string]*handler // topic -> handler
 	started  atomic.Bool         // 快路径判定 Start 是否已发生
@@ -43,20 +47,53 @@ type Queue struct {
 	wg       sync.WaitGroup      // worker goroutine 计数
 }
 
+// publishScript LPUSH 后按 max 裁剪,返回 {length_after_trim, dropped}。
+// max=0 时短路掉 LTRIM,行为等同纯 LPUSH。返回数组省一次 LLEN 往返。
+const publishScript = `
+local max = tonumber(ARGV[2])
+local n = redis.call('LPUSH', KEYS[1], ARGV[1])
+if max > 0 and n > max then
+  redis.call('LTRIM', KEYS[1], 0, max - 1)
+  return {max, n - max}
+end
+return {n, 0}
+`
+
+// scriptPublish 是 publishScript 的 *redis.Script 句柄,New 时构造一次,Run 走 EVALSHA 缓存。
+var scriptPublish = redis.NewScript(publishScript)
+
 // New 构造 Queue。client 必传;keyPrefix 为空时使用 "jobqueue:"。
-func New(client *redis.Client, keyPrefix string) (*Queue, error) {
+func New(client *redis.Client, keyPrefix string, opts ...QueueOption) (*Queue, error) {
 	if client == nil {
 		return nil, ErrNilRedisClient
 	}
 	if keyPrefix == "" {
 		keyPrefix = defaultKeyPrefix
 	}
-	return &Queue{
+	q := &Queue{
 		client:    client,
 		keyPrefix: keyPrefix,
 		handlers:  make(map[string]*handler),
 		cancel:    func() {},
-	}, nil
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(q)
+		}
+	}
+	if q.metrics == nil {
+		q.metrics = NoopMetrics{}
+	}
+	return q, nil
+}
+
+// maxLenOf 返回 topic 的 max_len:topicMaxLen 显式配置优先,否则回退 defaultMaxLen。
+// 0 表示不限。
+func (q *Queue) maxLenOf(topic string) int {
+	if n, ok := q.topicMaxLen[topic]; ok {
+		return n
+	}
+	return q.defaultMaxLen
 }
 
 // Subscribe 注册 topic 的处理函数。fn 形态:
@@ -94,6 +131,10 @@ func (q *Queue) Subscribe(topic string, fn any, opts ...SubscribeOption) error {
 // Publish 把 args JSON 化后 LPUSH 到 topic 对应 key。
 // 不依赖 Start,允许"只生产不消费"的服务调用。
 //
+// 若 topic 配了 max_len 且 LPUSH 后超过上限,会通过 LTRIM 原子裁掉最老消息
+// (FIFO 角度:即将被消费的那一端);被丢弃的数量通过 Metrics.PublishDropped 上报,
+// Publish 本身仍返回 nil —— 这是预期行为,业务通过指标告警感知。
+//
 // args 中的 []byte 会被 json.Marshal 编为 base64 字符串,业务方自行权衡。
 func (q *Queue) Publish(ctx context.Context, topic string, args ...any) error {
 	if topic == "" {
@@ -106,8 +147,27 @@ func (q *Queue) Publish(ctx context.Context, topic string, args ...any) error {
 	if err != nil {
 		return fmt.Errorf("jobqueue: marshal args for %q: %w", topic, err)
 	}
-	if err := q.client.LPush(ctx, q.keyOf(topic), payload).Err(); err != nil {
-		return fmt.Errorf("jobqueue: lpush %q: %w", topic, err)
+
+	key := q.keyOf(topic)
+	maxLen := q.maxLenOf(topic)
+	raw, err := scriptPublish.Run(ctx, q.client, []string{key}, payload, maxLen).Int64Slice()
+	if err != nil {
+		return fmt.Errorf("jobqueue: publish %q: %w", topic, err)
+	}
+	if len(raw) != 2 {
+		return fmt.Errorf("jobqueue: publish %q: unexpected script result %v", topic, raw)
+	}
+	length, dropped := raw[0], raw[1]
+
+	q.metrics.PublishTotal(topic)
+	q.metrics.QueueLength(topic, length)
+	if dropped > 0 {
+		q.metrics.PublishDropped(topic, dropped)
+		log.Ctx(ctx).Warn().
+			Str("topic", topic).
+			Int("max_len", maxLen).
+			Int64("dropped", dropped).
+			Msg("jobqueue: queue overflow, oldest messages trimmed")
 	}
 	return nil
 }

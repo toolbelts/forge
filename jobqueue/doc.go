@@ -8,6 +8,11 @@
 // 投递语义为 at-most-once:worker 进程崩溃可能丢失正在处理的消息,业务对此应有预期;
 // handler 内 panic 由 recover 兜住、返回 err 仅打 Error 日志,均不会重新入队也不进死信。
 //
+// 容量保护:WithDefaultMaxLen(n) / WithTopicMaxLen(topic, n) 给 LIST 设上限。
+// Publish 在 LPUSH 后通过 LTRIM 原子裁掉最老的消息(默认 0 = 不限),Publish 仍返回 nil。
+// 被丢弃的数量通过 Metrics.PublishDropped 上报,业务应据此配阈值告警 —— 这是消费者宕机
+// 或处理跟不上的核心信号。OTel 接入显式 jobqueue.WithMetrics(jobqueue.NewOTelMetrics())。
+//
 // fn 必须形如 func(ctx context.Context, ...) error —— 第一个参数固定 context.Context,
 // 出参恰好 1 个 error,其它入参类型任意。Publish 必须按相同顺序传值。
 package jobqueue

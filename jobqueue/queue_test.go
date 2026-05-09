@@ -426,3 +426,199 @@ func TestQueue_EmptyTopic(t *testing.T) {
 		t.Fatalf("expected ErrEmptyTopic, got %v", err)
 	}
 }
+
+// stubMetrics 单测用的 Metrics 实现,记录调用次数与最后一次参数。
+type stubMetrics struct {
+	mu               sync.Mutex
+	publishTotal     map[string]int
+	publishDropped   map[string]int64 // 累计 dropped 数
+	publishDroppedN  int              // 调用次数
+	queueLen         map[string]int64 // 最后一次值
+	queueLenCalls    int
+}
+
+func newStubMetrics() *stubMetrics {
+	return &stubMetrics{
+		publishTotal:   make(map[string]int),
+		publishDropped: make(map[string]int64),
+		queueLen:       make(map[string]int64),
+	}
+}
+
+func (s *stubMetrics) PublishTotal(topic string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publishTotal[topic]++
+}
+
+func (s *stubMetrics) PublishDropped(topic string, n int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publishDropped[topic] += n
+	s.publishDroppedN++
+}
+
+func (s *stubMetrics) QueueLength(topic string, n int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.queueLen[topic] = n
+	s.queueLenCalls++
+}
+
+// newTestQueueWith 用自定义 option 构造测试队列。
+func newTestQueueWith(t *testing.T, opts ...QueueOption) (*Queue, *miniredis.Miniredis) {
+	t.Helper()
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	q, err := New(client, "jq:", opts...)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return q, mr
+}
+
+// TestQueue_PublishMaxLen_TrimsOldest max_len=3,LPUSH 5 条,LIST 应保留最新 3 条。
+// FIFO 角度:消费顺序应为 m3,m4,m5(m1/m2 被丢)。
+func TestQueue_PublishMaxLen_TrimsOldest(t *testing.T) {
+	t.Parallel()
+	q, mr := newTestQueueWith(t, WithDefaultMaxLen(3))
+
+	ctx := context.Background()
+	for _, m := range []string{"m1", "m2", "m3", "m4", "m5"} {
+		if err := q.Publish(ctx, "cap", m); err != nil {
+			t.Fatalf("Publish %s: %v", m, err)
+		}
+	}
+	got, err := mr.List("jq:cap")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	// LPUSH 把 m5 放头部 → got[0]=m5, got[1]=m4, got[2]=m3。BRPOP 从尾部 → m3,m4,m5。
+	if len(got) != 3 || got[0] != `["m5"]` || got[1] != `["m4"]` || got[2] != `["m3"]` {
+		t.Fatalf("LIST contents = %v, want [m5, m4, m3]", got)
+	}
+}
+
+// TestQueue_PublishMaxLen_PerTopicOverride per-topic 配置覆盖 default。
+func TestQueue_PublishMaxLen_PerTopicOverride(t *testing.T) {
+	t.Parallel()
+	q, mr := newTestQueueWith(t,
+		WithDefaultMaxLen(2),
+		WithTopicMaxLen("big", 5),
+	)
+	ctx := context.Background()
+
+	for i := range 5 {
+		if err := q.Publish(ctx, "big", i); err != nil {
+			t.Fatalf("Publish big: %v", err)
+		}
+	}
+	if !mr.Exists("jq:big") {
+		t.Fatal("jq:big missing")
+	}
+	if got, _ := mr.List("jq:big"); len(got) != 5 {
+		t.Fatalf("big LIST len = %d, want 5", len(got))
+	}
+
+	for i := range 5 {
+		if err := q.Publish(ctx, "small", i); err != nil {
+			t.Fatalf("Publish small: %v", err)
+		}
+	}
+	if got, _ := mr.List("jq:small"); len(got) != 2 {
+		t.Fatalf("small LIST len = %d, want 2 (default)", len(got))
+	}
+}
+
+// TestQueue_PublishMaxLen_Zero default=0 表示不限,行为完全等同改造前。
+func TestQueue_PublishMaxLen_Zero(t *testing.T) {
+	t.Parallel()
+	q, mr := newTestQueueWith(t)
+	ctx := context.Background()
+	for i := range 50 {
+		if err := q.Publish(ctx, "free", i); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+	if got, _ := mr.List("jq:free"); len(got) != 50 {
+		t.Fatalf("LIST len = %d, want 50", len(got))
+	}
+}
+
+// TestQueue_PublishMaxLen_TopicZeroOverridesDefault per-topic 显式 0 应禁用该 topic 的裁剪。
+func TestQueue_PublishMaxLen_TopicZeroOverridesDefault(t *testing.T) {
+	t.Parallel()
+	q, mr := newTestQueueWith(t,
+		WithDefaultMaxLen(3),
+		WithTopicMaxLen("unbounded", 0),
+	)
+	ctx := context.Background()
+	for i := range 10 {
+		if err := q.Publish(ctx, "unbounded", i); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	if got, _ := mr.List("jq:unbounded"); len(got) != 10 {
+		t.Fatalf("LIST len = %d, want 10", len(got))
+	}
+}
+
+// TestMetrics_PublishCounters 验证 Metrics 在各路径的回调。
+func TestMetrics_PublishCounters(t *testing.T) {
+	t.Parallel()
+	m := newStubMetrics()
+	q, _ := newTestQueueWith(t, WithDefaultMaxLen(3), WithMetrics(m))
+
+	ctx := context.Background()
+	// 前 3 条不触发 dropped
+	for i := range 3 {
+		if err := q.Publish(ctx, "t", i); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	m.mu.Lock()
+	if m.publishTotal["t"] != 3 {
+		t.Fatalf("PublishTotal = %d, want 3", m.publishTotal["t"])
+	}
+	if m.publishDroppedN != 0 {
+		t.Fatalf("PublishDropped should not be called yet, got %d", m.publishDroppedN)
+	}
+	if m.queueLen["t"] != 3 {
+		t.Fatalf("QueueLength = %d, want 3", m.queueLen["t"])
+	}
+	m.mu.Unlock()
+
+	// 第 4、5 条各丢 1 条
+	for _, i := range []int{3, 4} {
+		if err := q.Publish(ctx, "t", i); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.publishTotal["t"] != 5 {
+		t.Fatalf("PublishTotal = %d, want 5", m.publishTotal["t"])
+	}
+	if m.publishDropped["t"] != 2 {
+		t.Fatalf("PublishDropped sum = %d, want 2", m.publishDropped["t"])
+	}
+	if m.publishDroppedN != 2 {
+		t.Fatalf("PublishDropped call count = %d, want 2", m.publishDroppedN)
+	}
+	if m.queueLen["t"] != 3 {
+		t.Fatalf("QueueLength = %d, want 3 (capped)", m.queueLen["t"])
+	}
+}
+
+// TestMetrics_NoopDefault 默认 Metrics 是 NoopMetrics,不传 WithMetrics 也不应 panic。
+func TestMetrics_NoopDefault(t *testing.T) {
+	t.Parallel()
+	q, _ := newTestQueueWith(t, WithDefaultMaxLen(1))
+	ctx := context.Background()
+	for i := range 5 {
+		if err := q.Publish(ctx, "t", i); err != nil {
+			t.Fatalf("Publish: %v", err)
+		}
+	}
+}

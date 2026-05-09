@@ -19,6 +19,10 @@ const jobqueueDefaultRedisName = "default"
 //   - jobqueue.enabled=false 时静默跳过(不向容器注入实例),业务方调用 MustGetJobQueue 会 panic,
 //     这是有意为之 —— 关闭队列时不应允许业务方依赖它
 //   - 依赖 RedisProvider,从容器按 jobqueue.redis (默认 "default") 取 redis 客户端
+//   - jobqueue.max_len 设全局 LIST 长度上限 (0 = 不限);超限时 Publish 自动 LTRIM 丢最老消息,
+//     被丢数量通过 OTel 指标 jobqueue.publish.dropped 上报。需要 per-topic 覆盖请业务方
+//     自行 jobqueue.New(... WithTopicMaxLen(...))。
+//   - 默认接 jobqueue.NewOTelMetrics();metrics.enabled=false 时全局 MeterProvider 是 noop,零开销
 //   - Serve 仅在 enabled 时启动 worker 并阻塞到 ctx 取消
 //   - Shutdown 通过 queue.Stop() 等待 worker 收尾,超时阈值 jobqueue.shutdown_timeout
 type JobQueueProvider struct {
@@ -44,8 +48,13 @@ func (p *JobQueueProvider) Register(ctx context.Context) error {
 
 	keyPrefix := v.GetString("jobqueue.key_prefix")
 	p.shutdownTimeout = v.GetDuration("jobqueue.shutdown_timeout")
+	maxLen := v.GetInt("jobqueue.max_len")
 
-	q, err := jobqueue.New(client, keyPrefix)
+	// 默认接 OTel metrics:与全局 MeterProvider 联动,metrics.enabled=false 时是 noop,零开销。
+	q, err := jobqueue.New(client, keyPrefix,
+		jobqueue.WithDefaultMaxLen(maxLen),
+		jobqueue.WithMetrics(jobqueue.NewOTelMetrics()),
+	)
 	if err != nil {
 		return err
 	}
@@ -56,6 +65,7 @@ func (p *JobQueueProvider) Register(ctx context.Context) error {
 		Str("provider", "jobqueue").
 		Str("redis", redisName).
 		Str("key_prefix", keyPrefix).
+		Int("max_len", maxLen).
 		Dur("shutdown_timeout", p.shutdownTimeout).
 		Msg("jobqueue registered")
 	return nil

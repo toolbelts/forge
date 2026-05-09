@@ -34,7 +34,7 @@
 
 `App.Use(...)` 调用顺序决定两件事:
 
-1. **Register 阶段顺序** — 所有 Register 完成后才进入 Setup,但 Register 内部读取的容器实例必须在更早的 Provider 已注入。例:`MetricsProvider`/`TraceProvider` 必须在 `RedisProvider` / `DatabaseProvider` 之前 — 后两者在 Register 时挂 OTel hook,需要全局 MeterProvider/TracerProvider 已就绪
+1. **Register 阶段顺序** — 所有 Register 完成后才进入 Setup,但 Register 内部读取的容器实例必须在更早的 Provider 已注入。例:启用 instrumentation 时,`MetricsProvider`/`TraceProvider` 必须在 `RedisProvider` / `DatabaseProvider` 之前 — 后两者在 Register 时挂 OTel hook,需要全局 MeterProvider/TracerProvider 已就绪
 2. **Setup 阶段顺序** — `InterceptorChain.Use` 调用是 Setup 阶段的 side effect,而 `GrpcProvider.Setup` 读 chain 来构造 `*grpc.Server`。所以**所有拦截器 Provider 必须在 `GrpcProvider` 之前 Use**,否则 chain 在 Grpc 构造 server 时还是空的
 
 LIFO Shutdown 自动反向,无需手动管理。
@@ -46,16 +46,16 @@ LIFO Shutdown 自动反向,无需手动管理。
 | 1 | `BuildProvider` | 注入 `*BuildInfo`。**必须在** Trace/Metrics/Notify 之前(它们的 Register 读 `MustGetBuildInfo`) |
 | 2 | `ConfigProvider` | viper + .env 加载,所有后续 Provider 的前置 |
 | 3 | `LoggerProvider` | zerolog 全局 logger,读 `log.level` 并热重载 |
-| 4 | `MetricsProvider` | OTel MeterProvider。**必须早于** Redis/Database 的 Register(它们 Register 时已装 otel stats handler / query hook) |
-| 5 | `TraceProvider` | 同上,OTel TracerProvider + Propagator |
+| 4 | `MetricsProvider` | OTel MeterProvider。启用 metrics instrumentation 时,必须早于 Redis/Database/Gateway/JobQueue 等会挂 hook 的 Provider |
+| 5 | `TraceProvider` | OTel TracerProvider + Propagator。启用 trace instrumentation 时,必须早于 Redis/Database/Gateway 等会挂 hook 的 Provider |
 | 6 | `NotifyProvider` | 通知器,被 `RecoveryProvider.Setup` 引用。本身实现 `Server`:所有 Provider Setup 完成后发 "started",Shutdown 阶段(LIFO 最末)发 "stopped" — 所以位置要靠前 |
 
 ### B. 数据层(按需)
 
 | # | Provider | 说明 |
 |---|---|---|
-| 7 | `RedisProvider` | 多实例 redis 客户端。`Register` 阶段就把客户端注入容器并挂 otel hook |
-| 8 | `DatabaseProvider` | 多实例 `*bun.DB`,Register 阶段挂 bunotel query hook |
+| 7 | `RedisProvider` | 多实例 redis 客户端。`Register` 阶段就把客户端注入容器;按 instrumentation 配置决定是否挂 redisotel hook |
+| 8 | `DatabaseProvider` | 多实例 `*bun.DB`;按 instrumentation 配置决定是否挂 bunotel query hook |
 | 9 | `MigrationProvider` | 仅迁移子命令路径下注册,正常 serve 不挂(参见 `migration.go` 顶部注释) |
 | 10 | `LockProvider` | 分布式锁工厂(Setup 时取 Redis 客户端,顺序无强约束) |
 | 11 | `CronProvider` | 定时任务调度器 |
@@ -143,6 +143,17 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 | `env` | string | — | — | resource 上的 `env` 标签 |
 | `shutdown_timeout` | duration | `5s` | — | 关停时等待 reader 清空缓冲 |
 
+metrics 自动插桩配置:
+
+| 键 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `instrumentation.enabled` | bool | `metrics.enabled` | metrics 自动插桩总开关 |
+| `instrumentation.redis` | bool | 上一行结果 | 覆盖 RedisProvider metrics hook |
+| `instrumentation.database` | bool | 上一行结果 | 覆盖 DatabaseProvider bunotel metrics hook |
+| `instrumentation.grpc` | bool | 上一行结果 | 覆盖 GrpcProvider otelgrpc server metrics hook |
+| `instrumentation.gateway` | bool | 上一行结果 | 覆盖 GatewayProvider otelgrpc client metrics hook |
+| `instrumentation.jobqueue` | bool | 上一行结果 | 覆盖 JobQueueProvider metrics |
+
 ### TraceProvider — `trace.*`
 
 | 键 | 类型 | 默认值 | 必填 | 说明 |
@@ -154,6 +165,16 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 | `headers` | map | — | — | OTLP 请求头 |
 | `env` | string | — | — | resource 上的 `env` 标签 |
 | `shutdown_timeout` | duration | `5s` | — | 关停超时 |
+
+trace 自动插桩配置:
+
+| 键 | 类型 | 默认值 | 说明 |
+|---|---|---|---|
+| `instrumentation.enabled` | bool | `trace.enabled` | trace 自动插桩总开关 |
+| `instrumentation.redis` | bool | 上一行结果 | 覆盖 RedisProvider trace hook |
+| `instrumentation.database` | bool | 上一行结果 | 覆盖 DatabaseProvider bunotel trace hook |
+| `instrumentation.grpc` | bool | 上一行结果 | 覆盖 GrpcProvider otelgrpc server trace hook |
+| `instrumentation.gateway` | bool | 上一行结果 | 覆盖 GatewayProvider otelgrpc client trace hook 与 HTTP traceparent 提取 |
 
 > Metrics / Trace 的 `service.name`、`service.version`、`service.instance.id` 均来自 `BuildInfo` + `AppName`,无需重复在 yaml 配。
 
@@ -184,7 +205,7 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 | `write_timeout` | duration | — | go-redis 默认 | |
 | `pool_timeout` | duration | — | go-redis 默认 | |
 
-启动时会 `Ping`,失败立即返回错误。
+启动时会 `Ping`,失败立即返回错误。Redis trace/metrics hook 默认分别跟随 `trace.enabled` / `metrics.enabled`,也可用 `trace.instrumentation.redis` / `metrics.instrumentation.redis` 单独覆盖。trace hook 默认关闭 Redis DB statement 和 caller file/line,避免每条命令采集调用栈。
 
 ### DatabaseProvider — `database.<name>.*`
 
@@ -199,7 +220,7 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 | `conn_max_idle_time` | duration | — | |
 | `slow` | duration | — | 超过阈值的查询用 zerolog warn 记录 |
 
-启动时 `PingContext`,失败立即返回错误。已挂 `bunotel` query hook,trace 自动接续。
+启动时 `PingContext`,失败立即返回错误。bunotel query hook 默认在 `trace.enabled` 或 `metrics.enabled` 任一开启时挂载,也可用 `trace.instrumentation.database` / `metrics.instrumentation.database` 单独覆盖。
 
 ### GrpcProvider — `grpc.*`
 
@@ -210,6 +231,8 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 | `max_recv_msg_size` | int | — | `>0` 时覆盖 grpc 默认 |
 | `max_send_msg_size` | int | — | 同上 |
 | `shutdown_timeout` | duration | — | 超过此值后从 GracefulStop 升级到 Stop |
+
+otelgrpc server stats handler 默认在 `trace.enabled` 或 `metrics.enabled` 任一开启时挂载,也可用 `trace.instrumentation.grpc` / `metrics.instrumentation.grpc` 单独覆盖。
 
 ### HttpProvider — `http.*`
 
@@ -233,6 +256,8 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 | `read_timeout` / `read_header_timeout` / `write_timeout` / `idle_timeout` / `shutdown_timeout` | duration | — | 同 HttpProvider |
 
 JSON 编码固定使用 proto 字段名(`UseProtoNames=true`),枚举输出字符串,默认值输出到响应体。
+
+otelgrpc client stats handler 默认在 `trace.enabled` 或 `metrics.enabled` 任一开启时挂载,也可用 `trace.instrumentation.gateway` / `metrics.instrumentation.gateway` 单独覆盖。HTTP `traceparent` 提取跟随 `trace.instrumentation.gateway`。
 
 ### TcpProvider — `tcp.*`
 
@@ -326,6 +351,7 @@ JSON 编码固定使用 proto 字段名(`UseProtoNames=true`),枚举输出字符
 | `shutdown_timeout` | duration | `30s` | 等待 worker 收尾 |
 
 业务方在自己的 `Setup` 里 `MustGetJobQueue(ctx).Subscribe(topic, fn)`。
+JobQueue OTel metrics 默认跟随 `metrics.enabled`,也可用 `metrics.instrumentation.jobqueue` 单独覆盖;关闭时使用 `jobqueue.NoopMetrics`。
 
 ### DbcacheProvider — `dbcache.<name>.*`
 
@@ -342,7 +368,7 @@ JSON 编码固定使用 proto 字段名(`UseProtoNames=true`),枚举输出字符
 
 > **失效**:dbcache 不实装跨进程广播,多实例下 L1 靠 TTL 自然收敛。业务方写后失效仍由自家 model 的 bun `AfterUpdate/AfterDelete` hook 调 `cache.Delete`。
 
-**可观测性(默认 noop,显式接入 OTel)**:业务在 `dbcache.New` 时显式 `dbcache.WithMetrics(dbcache.NewOTelMetrics())` 和/或 `dbcache.WithTracer(dbcache.NewOTelTracer())` 才会上报。两个工厂内部走全局 `otel.MeterProvider` / `otel.TracerProvider`,与 `metrics.enabled` / `trace.enabled` 联动 —— 未启用时是 noop。
+**可观测性(默认 noop,显式接入 OTel)**:业务在 `dbcache.New` 时显式 `dbcache.WithMetrics(dbcache.NewOTelMetrics())` 和/或 `dbcache.WithTracer(dbcache.NewOTelTracer())` 才会上报。两个工厂内部走全局 `otel.MeterProvider` / `otel.TracerProvider`,与 `metrics.enabled` / `trace.enabled` 联动 —— 未启用时是 noop。Provider 的 `trace.instrumentation.*` / `metrics.instrumentation.*` 只控制自动挂载的 Provider hook,不控制这种业务显式接入。
 
 - 指标:`dbcache.hits` / `dbcache.misses`(Counter,标签 `dbcache.name`)、`dbcache.load.duration`(Histogram,单位 `ms`,标签 `dbcache.name` + `dbcache.status`=`ok`|`not_found`|`error`)。
 - 追踪:`dbcache.Get` / `dbcache.MGet` / `dbcache.Set` / `dbcache.Delete` / `dbcache.Warm` 外层 span;loader 回源用子 span `dbcache.Loader`;Redis store 走 redisotel 自动作为更深一层子 span 出现。
@@ -646,7 +672,7 @@ notify:
 - **拦截器 Provider 必须在 GrpcProvider 之前 Use**:`InterceptorChain.Use` 是 Setup 阶段的 side effect,Setup 按 Use 顺序跑;`GrpcProvider.Setup` 读 chain 构造 server。如果拦截器 Provider 排在 GrpcProvider 之后,Grpc 拿到的 chain 是空的,所有拦截器丢失。**6 个拦截器内部顺序也必须严格按链外→内**:`Recovery → AccessLog → Error → RateLimit → Validate → Token`
 - **`enabled=false` 与 `MustGet`**:`CronProvider`/`JobQueueProvider`/`LockProvider` 等关闭时不向容器注入实例,业务方调 `MustGet` 直接 panic。这是有意为之 —— 关闭某能力时不应允许业务方依赖它
 - **`viper.GetBool` / `GetInt` 在键缺失时返回零值**:对默认值非零的开关(`token.refresh_rotation` 默认 true、`lock.retry` 默认非零)必须用 `v.IsSet(...)` 守卫,否则会被误关
-- **Metrics / Trace 时序**:必须 Use 在 Redis/Database/Gateway 之前。后三者的 Register 阶段挂 `redisotel.InstrumentTracing` / `bunotel.NewQueryHook` / `otelgrpc.NewClientHandler`,需要全局 MeterProvider/TracerProvider 已就绪。`GrpcProvider` 的 otelgrpc handler 在 Setup 阶段才装,顺序无强约束(Setup 永远晚于所有 Register)
+- **Metrics / Trace 时序**:启用自动 instrumentation 时,必须 Use 在 Redis/Database/Gateway 之前。后三者的 Register 阶段可能挂 `redisotel.InstrumentTracing` / `bunotel.NewQueryHook` / `otelgrpc.NewClientHandler`,需要全局 MeterProvider/TracerProvider 已就绪。`GrpcProvider` 的 otelgrpc handler 在 Setup 阶段才装,顺序无强约束(Setup 永远晚于所有 Register)
 - **JobQueue / Dbcache(redis|tiered)必须在 Redis 之后**:它们在 Register 阶段就调 `(Must)GetRedis`,所以必须排在 RedisProvider 之后 Use。Dbcache 的 `memory` 后端无此约束
 - **InterceptorChain 总要 Use**:即使不开 gRPC,`GrpcProvider` 也要 Use(可以 `grpc.enabled=false`),它的 Register 阶段创建 chain。否则拦截器 Provider 在 Setup 时拿不到 chain
 - **`grpc.addr=":0"` + Registry**:支持。RegistryProvider 从 listener 读实际端口,而不是从 `grpc.addr` 字符串解析

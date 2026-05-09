@@ -23,10 +23,9 @@ import (
 //
 // 编排约定：
 //   - 排在 LoggerProvider 之后、所有依赖 trace 的 Provider 之前。
-//     Redis/Database/Grpc/Gateway 在 Register 阶段就装 stats handler / query hook，
+//     开启 trace instrumentation 的 Provider 会在 Register/Setup 阶段装 trace hook,
 //     必须保证此时全局 TracerProvider 已就绪，否则 instrumentation 拿到的是 noop。
-//   - 即使 trace.enabled=false，全局保留 OTel 默认的 noop tracer，instrumentation
-//     仍可无条件挂载（性能开销可忽略），业务代码与开关解耦。
+//   - trace.enabled=false 时全局保留 OTel 默认的 noop tracer,且默认关闭自动 instrumentation。
 //
 // Resource 字段：
 //   - service.name        viper.GetString("app.name")，回退 "gpd"

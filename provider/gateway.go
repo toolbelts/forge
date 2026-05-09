@@ -33,6 +33,8 @@ type GatewayProvider struct {
 	server          *http.Server
 	conn            *grpc.ClientConn
 	shutdownTimeout time.Duration
+	otelEnabled     bool
+	traceEnabled    bool
 }
 
 // Register 当 gateway.enabled 为真时建立监听、dial gRPC 后端并构造 *runtime.ServeMux 与 *http.Server。
@@ -52,6 +54,8 @@ func (p *GatewayProvider) Register(ctx context.Context) error {
 	if endpoint == "" {
 		return fmt.Errorf("gateway grpc_endpoint is empty")
 	}
+	p.traceEnabled = traceInstrumentationEnabled(v, observabilityComponentGateway)
+	p.otelEnabled = p.traceEnabled || metricsInstrumentationEnabled(v, observabilityComponentGateway)
 
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -59,10 +63,13 @@ func (p *GatewayProvider) Register(ctx context.Context) error {
 	}
 	p.listener = lis
 
-	conn, err := grpc.NewClient(endpoint,
+	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
-	)
+	}
+	if p.otelEnabled {
+		dialOpts = append(dialOpts, grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
+	}
+	conn, err := grpc.NewClient(endpoint, dialOpts...)
 	if err != nil {
 		_ = lis.Close()
 		return fmt.Errorf("gateway dial %s: %w", endpoint, err)
@@ -75,8 +82,13 @@ func (p *GatewayProvider) Register(ctx context.Context) error {
 		runtime.WithMetadata(meta.Annotator),
 	)
 
+	handler := http.Handler(p.mux)
+	if p.traceEnabled {
+		handler = withTracePropagation(handler)
+	}
+
 	p.server = &http.Server{
-		Handler:           withTracePropagation(p.mux),
+		Handler:           handler,
 		ReadTimeout:       v.GetDuration("gateway.read_timeout"),
 		ReadHeaderTimeout: v.GetDuration("gateway.read_header_timeout"),
 		WriteTimeout:      v.GetDuration("gateway.write_timeout"),

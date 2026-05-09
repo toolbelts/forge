@@ -15,7 +15,9 @@ import (
 
 // RedisProvider Redis 提供者，支持从配置加载多个 Redis 实例。
 type RedisProvider struct {
-	clients map[string]*redis.Client
+	clients        map[string]*redis.Client
+	traceEnabled   bool
+	metricsEnabled bool
 }
 
 // Register 扫描 redis.* 配置创建多个客户端，连通性验证后绑定到容器。
@@ -23,6 +25,8 @@ func (p *RedisProvider) Register(ctx context.Context) error {
 	v := ioc.MustGet[*viper.Viper](ctx)
 	redisMap := v.GetStringMap("redis")
 	p.clients = make(map[string]*redis.Client, len(redisMap))
+	p.traceEnabled = traceInstrumentationEnabled(v, observabilityComponentRedis)
+	p.metricsEnabled = metricsInstrumentationEnabled(v, observabilityComponentRedis)
 
 	for name := range redisMap {
 		prefix := "redis." + name
@@ -54,11 +58,18 @@ func (p *RedisProvider) Register(ctx context.Context) error {
 		}
 
 		client := redis.NewClient(opts)
-		if err := redisotel.InstrumentTracing(client); err != nil {
-			return fmt.Errorf("redis [%s] instrument tracing failed: %w", name, err)
+		if p.traceEnabled {
+			if err := redisotel.InstrumentTracing(client,
+				redisotel.WithDBStatement(false),
+				redisotel.WithCallerEnabled(false),
+			); err != nil {
+				return fmt.Errorf("redis [%s] instrument tracing failed: %w", name, err)
+			}
 		}
-		if err := redisotel.InstrumentMetrics(client); err != nil {
-			return fmt.Errorf("redis [%s] instrument metrics failed: %w", name, err)
+		if p.metricsEnabled {
+			if err := redisotel.InstrumentMetrics(client, redisotel.WithPoolName(name)); err != nil {
+				return fmt.Errorf("redis [%s] instrument metrics failed: %w", name, err)
+			}
 		}
 		if err := client.Ping(ctx).Err(); err != nil {
 			return fmt.Errorf("redis [%s] ping failed: %w", name, err)

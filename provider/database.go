@@ -19,7 +19,8 @@ import (
 
 // DatabaseProvider 数据库提供者，支持从配置加载多个 PostgreSQL 实例。
 type DatabaseProvider struct {
-	clients map[string]*bun.DB
+	clients     map[string]*bun.DB
+	otelEnabled bool
 }
 
 // Register 扫描 database.* 配置创建多个 bun.DB 实例，连通性验证后绑定到容器。
@@ -27,6 +28,8 @@ func (p *DatabaseProvider) Register(ctx context.Context) error {
 	v := ioc.MustGet[*viper.Viper](ctx)
 	dbMap := v.GetStringMap("database")
 	p.clients = make(map[string]*bun.DB, len(dbMap))
+	p.otelEnabled = traceInstrumentationEnabled(v, observabilityComponentDatabase) ||
+		metricsInstrumentationEnabled(v, observabilityComponentDatabase)
 
 	for name := range dbMap {
 		prefix := "database." + name
@@ -51,7 +54,9 @@ func (p *DatabaseProvider) Register(ctx context.Context) error {
 
 		db := bun.NewDB(sqldb, pgdialect.New())
 
-		db.AddQueryHook(bunotel.NewQueryHook(bunotel.WithDBName(name)))
+		if p.otelEnabled {
+			db.AddQueryHook(bunotel.NewQueryHook(bunotel.WithDBName(name)))
+		}
 
 		if slow := v.GetDuration(prefix + ".slow"); slow > 0 {
 			db.AddQueryHook(&slowQueryHook{name: name, threshold: slow})

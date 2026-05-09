@@ -22,10 +22,9 @@ import (
 //
 // 编排约定（与 TraceProvider 一致）：
 //   - 排在 LoggerProvider 之后、所有依赖 metric 的 Provider 之前。
-//     Grpc(otelgrpc)、Database(bunotel) 在 Register 阶段就装 stats handler / query hook，
+//     开启 metrics instrumentation 的 Provider 会在 Register/Setup 阶段装 metrics hook,
 //     必须保证此时全局 MeterProvider 已就绪，否则拿到的是 noop meter。
-//   - metrics.enabled=false 时全局保留 OTel 默认的 noop meter，instrumentation 仍可
-//     无条件挂载（性能开销可忽略），业务代码与开关解耦。
+//   - metrics.enabled=false 时全局保留 OTel 默认的 noop meter,且默认关闭自动 instrumentation。
 //
 // Resource 字段与 trace 一致，便于在 collector 侧按 service.* 关联：
 //   - service.name        viper.GetString("app.name")，回退 "gpd"

@@ -26,6 +26,7 @@ type GrpcProvider struct {
 	maxRecvMsgSize  int
 	maxSendMsgSize  int
 	shutdownTimeout time.Duration
+	otelEnabled     bool
 }
 
 // Register 注入 *InterceptorChain，读 viper 配置并 listen，让其它 Provider 能在 Setup 中加拦截器。
@@ -52,6 +53,8 @@ func (p *GrpcProvider) Register(ctx context.Context) error {
 	p.maxRecvMsgSize = v.GetInt("grpc.max_recv_msg_size")
 	p.maxSendMsgSize = v.GetInt("grpc.max_send_msg_size")
 	p.shutdownTimeout = v.GetDuration("grpc.shutdown_timeout")
+	p.otelEnabled = traceInstrumentationEnabled(v, observabilityComponentGrpc) ||
+		metricsInstrumentationEnabled(v, observabilityComponentGrpc)
 
 	// 注入 listener 让后续 Provider(如 RegistryProvider) 拿到实际监听端口,
 	// 支持 grpc.addr 配 ":0" 让内核选随机端口的场景。
@@ -69,7 +72,9 @@ func (p *GrpcProvider) Setup(ctx context.Context) error {
 
 	chain := ioc.MustGet[*InterceptorChain](ctx)
 	opts := chain.ServerOptions()
-	opts = append(opts, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	if p.otelEnabled {
+		opts = append(opts, grpc.StatsHandler(otelgrpc.NewServerHandler()))
+	}
 	if p.maxRecvMsgSize > 0 {
 		opts = append(opts, grpc.MaxRecvMsgSize(p.maxRecvMsgSize))
 	}

@@ -27,11 +27,13 @@ var (
 	ErrTopicExists = errors.New("jobqueue: topic already subscribed")
 	// ErrAlreadyStarted Start 之后再 Subscribe / 重复 Start。
 	ErrAlreadyStarted = errors.New("jobqueue: queue already started")
+	// ErrStopped Stop 之后再 Start / Subscribe / Publish。
+	ErrStopped = errors.New("jobqueue: queue stopped")
 )
 
 // Queue 单 Redis LIST 后端的极简任务队列。
 // 生命周期:New → Subscribe* → Start → (运行中) → Stop。
-// Publish 任何时候都可调用,与 worker 状态无关。
+// Publish 在 Stop 前均可调用,与 worker 是否 Start 无关。
 type Queue struct {
 	client    *redis.Client
 	keyPrefix string
@@ -40,11 +42,19 @@ type Queue struct {
 	topicMaxLen   map[string]int // 每 topic 覆盖,优先级高于 default;0 表示该 topic 不限
 	metrics       Metrics
 
+	// 合并发送配置与运行态。coalesceCfg 由 WithTopicCoalesce 填,
+	// coalescers 在 New 末尾按 cfg 构造好,运行期只读,Publish 路径无锁查表。
+	coalesceCfg map[string]coalesceConfig
+	coalescers  map[string]*coalescer
+
 	mu       sync.Mutex          // 保护 handlers + cancel
 	handlers map[string]*handler // topic -> handler
 	started  atomic.Bool         // 快路径判定 Start 是否已发生
+	stopped  atomic.Bool         // Stop 已触发标志;Publish/Start/Subscribe 据此 fast-fail
 	cancel   context.CancelFunc  // New 时初始化为 no-op,Start 后被替换;Stop 调用即可
-	wg       sync.WaitGroup      // worker goroutine 计数
+	wg       sync.WaitGroup      // worker + coalesce flush goroutine 计数
+	stopOnce sync.Once
+	stopDone chan struct{}
 }
 
 // publishScript LPUSH 后按 max 裁剪,返回 {length_after_trim, dropped}。
@@ -82,6 +92,7 @@ func New(client *redis.Client, keyPrefix string, opts ...QueueOption) (*Queue, e
 		keyPrefix: keyPrefix,
 		handlers:  make(map[string]*handler),
 		cancel:    func() {},
+		stopDone:  make(chan struct{}),
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -90,6 +101,13 @@ func New(client *redis.Client, keyPrefix string, opts ...QueueOption) (*Queue, e
 	}
 	if q.metrics == nil {
 		q.metrics = NoopMetrics{}
+	}
+	// 依据 coalesceCfg 实例化 coalescer,运行期只读 — 让 Publish 分流不需加锁。
+	if len(q.coalesceCfg) > 0 {
+		q.coalescers = make(map[string]*coalescer, len(q.coalesceCfg))
+		for topic, cfg := range q.coalesceCfg {
+			q.coalescers[topic] = newCoalescer(q, topic, cfg)
+		}
 	}
 	return q, nil
 }
@@ -125,6 +143,9 @@ func (q *Queue) Subscribe(topic string, fn any, opts ...SubscribeOption) error {
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.stopped.Load() {
+		return ErrStopped
+	}
 	if q.started.Load() {
 		return ErrAlreadyStarted
 	}
@@ -135,18 +156,28 @@ func (q *Queue) Subscribe(topic string, fn any, opts ...SubscribeOption) error {
 	return nil
 }
 
-// Publish 把 args JSON 化后 LPUSH 到 topic 对应 key。
-// 不依赖 Start,允许"只生产不消费"的服务调用。
+// Publish 把 args JSON 化后推送到 topic 对应 key。
+// 不依赖 Start,允许"只生产不消费"的服务调用;Stop 后返回 ErrStopped。
 //
 // 若 topic 配了 max_len 且 LPUSH 后超过上限,会通过 LTRIM 原子裁掉最老消息
 // (FIFO 角度:即将被消费的那一端),且一次裁到 max/2 而非 max,以避免稳态日志洪水;
 // 被丢弃的数量通过 Metrics.PublishDropped 上报,Publish 本身仍返回 nil —— 这是
 // 预期行为,业务通过指标告警感知。
 //
+// 若 topic 通过 WithTopicCoalesce 开启了合并模式,Publish 转为 fire-and-forget:
+// payload 入内存缓冲后立即返回,达到 maxBatch 或满 window 时批量 LPUSH;
+// Redis/Lua 失败仅产生日志 + dropped 指标,进程崩溃会丢缓冲中未 flush 的消息。
+//
 // args 中的 []byte 会被 json.Marshal 编为 base64 字符串,业务方自行权衡。
 func (q *Queue) Publish(ctx context.Context, topic string, args ...any) error {
 	if topic == "" {
 		return ErrEmptyTopic
+	}
+	if q.stopped.Load() {
+		return ErrStopped
+	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("jobqueue: publish %q: %w", topic, err)
 	}
 	if args == nil {
 		args = []any{}
@@ -156,6 +187,22 @@ func (q *Queue) Publish(ctx context.Context, topic string, args ...any) error {
 		return fmt.Errorf("jobqueue: marshal args for %q: %w", topic, err)
 	}
 
+	if c, ok := q.coalescers[topic]; ok {
+		if err := c.enqueue(payload); err != nil {
+			return err
+		}
+		q.metrics.PublishTotal(topic) // 合并模式计数表示 payload 已进入内存缓冲
+		return nil
+	}
+	if q.stopped.Load() {
+		return ErrStopped
+	}
+	return q.publishOne(ctx, topic, payload)
+}
+
+// publishOne 同步路径:Lua 一次 LPUSH + 条件 LTRIM,失败向上抛错。
+// 合并路径不复用本函数 (它有自己的 batch Lua 与失败语义),指标上报字段相同。
+func (q *Queue) publishOne(ctx context.Context, topic string, payload []byte) error {
 	key := q.keyOf(topic)
 	maxLen := q.maxLenOf(topic)
 	raw, err := scriptPublish.Run(ctx, q.client, []string{key}, payload, maxLen).Int64Slice()
@@ -170,7 +217,7 @@ func (q *Queue) Publish(ctx context.Context, topic string, args ...any) error {
 	q.metrics.PublishTotal(topic)
 	q.metrics.QueueLength(topic, length)
 	if dropped > 0 {
-		q.metrics.PublishDropped(topic, dropped)
+		q.metrics.PublishDropped(topic, dropped, DropReasonOverflow)
 		log.Ctx(ctx).Warn().
 			Str("topic", topic).
 			Int("max_len", maxLen).
@@ -185,6 +232,9 @@ func (q *Queue) Publish(ctx context.Context, topic string, args ...any) error {
 // goroutine 内部根据 batch 选择 BRPOP / BLMPOP 模式。
 // parent 取消会传播到 worker ctx。重复 Start 返回 ErrAlreadyStarted。
 func (q *Queue) Start(parent context.Context) error {
+	if q.stopped.Load() {
+		return ErrStopped
+	}
 	if !q.started.CompareAndSwap(false, true) {
 		return ErrAlreadyStarted
 	}
@@ -209,20 +259,29 @@ func (q *Queue) Start(parent context.Context) error {
 	return nil
 }
 
-// Stop 取消 worker ctx 并返回 done chan,所有 worker 退出后被关闭。
+// Stop 取消 worker ctx、终止后续 Publish,并返回 done chan。
+// done 在所有 worker 与 coalesce flush 退出后关闭。
 // Stop 在 Start 之前调用安全 (cancel 默认是 no-op,wg 为空,done 立即 close)。
+//
+// 合并模式下的残留缓冲会异步 drain,由 done 表示完成;Stop 本身不会等待 Redis。
 func (q *Queue) Stop() <-chan struct{} {
-	q.mu.Lock()
-	cancel := q.cancel
-	q.mu.Unlock()
-	cancel()
+	q.stopOnce.Do(func() {
+		q.stopped.Store(true)
+		for _, c := range q.coalescers {
+			c.stop()
+		}
+		q.mu.Lock()
+		cancel := q.cancel
+		q.mu.Unlock()
+		cancel()
 
-	done := make(chan struct{})
-	go func() {
-		q.wg.Wait()
-		close(done)
-	}()
-	return done
+		go func() {
+			q.wg.Wait()
+			close(q.stopDone)
+		}()
+	})
+
+	return q.stopDone
 }
 
 // keyOf 返回 topic 对应的 Redis key。

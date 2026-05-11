@@ -1,5 +1,7 @@
 package jobqueue
 
+import "time"
+
 // SubscribeOption 调整单个 topic 的消费策略。
 type SubscribeOption func(*handler)
 
@@ -66,5 +68,30 @@ func WithMetrics(m Metrics) QueueOption {
 			m = NoopMetrics{}
 		}
 		q.metrics = m
+	}
+}
+
+// WithTopicCoalesce 把 topic 切到合并发送模式。
+//
+// Publish 不再同步 LPUSH,而是把 JSON payload 放入内存缓冲;buf 满 maxBatch 条
+// 或距首条入队满 window 时间时,合成一次 Lua 批量推送。Redis 最终结果与
+// N 次 Publish 等价 (顺序保留、LTRIM high/low watermark 仍逐条生效),消费端 handler 形态不变。
+//
+// 语义代价 —— 必须接受才用:
+//   - Publish 变 fire-and-forget。Redis 故障 / Lua 报错只产生日志 + dropped 指标
+//   - 进程崩溃丢失缓冲中未 flush 的消息 (at-most-once 本就允许丢)
+//
+// 适用:在线状态变更、心跳、点击埋点。重要事件不要走这条路径。
+// window <= 0 或 maxBatch <= 1 时 option 被忽略,等价于不配。
+// topic 为空时 option 被忽略。
+func WithTopicCoalesce(topic string, window time.Duration, maxBatch int) QueueOption {
+	return func(q *Queue) {
+		if topic == "" || window <= 0 || maxBatch <= 1 {
+			return
+		}
+		if q.coalesceCfg == nil {
+			q.coalesceCfg = make(map[string]coalesceConfig)
+		}
+		q.coalesceCfg[topic] = coalesceConfig{window: window, maxBatch: maxBatch}
 	}
 }

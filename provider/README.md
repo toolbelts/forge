@@ -350,10 +350,29 @@ otelgrpc client stats handler 默认在 `trace.enabled` 或 `metrics.enabled` �
 | `enabled` | bool | `false` | |
 | `redis` | string | `default` | |
 | `key_prefix` | string | — | redis key 前缀 |
-| `shutdown_timeout` | duration | `30s` | 等待 worker 收尾 |
+| `shutdown_timeout` | duration | `30s` | 等待 worker 与 coalesce drain 收尾 |
+| `max_len` | int | `0` | 全局 LIST 长度上限,`0` = 不限;超限时 Publish 自动 LTRIM 到 `max/2` |
+| `coalesce.<topic>.window` | duration | — | per-topic 合并触发时间窗 |
+| `coalesce.<topic>.max_batch` | int | — | per-topic 合并触发条数,需 `>=2` 才生效 |
 
 业务方在自己的 `Setup` 里 `MustGetJobQueue(ctx).Subscribe(topic, fn)`。
 JobQueue OTel metrics 默认跟随 `metrics.enabled`,也可用 `metrics.instrumentation.jobqueue` 单独覆盖;关闭时使用 `jobqueue.NoopMetrics`。
+
+**合并模式**:`coalesce.<topic>` 同时配 `window` 与 `max_batch` 才生效,`<topic>` 支持 `user.presence` 这种带点的 literal key;任一缺失或非法跳过并 warn 日志。开启后该 topic 的 `Publish` 转 fire-and-forget:成功只代表 payload 已进入内存缓冲,flush 成功上报 `jobqueue.coalesce.flush.total` 与 `jobqueue.coalesce.batch.size`,flush 失败只产生日志和 `jobqueue.publish.dropped{jobqueue.drop_reason="flush_failed"}`;进程崩溃丢未 flush 的缓冲。适用「单条不重要、靠最终态收敛」事件:在线状态、心跳、点击埋点。重要事件勿用。建议 `max_batch <= 1000` 且单事件 payload < 4KB,避免 Redis 单命令过大。
+
+```yaml
+jobqueue:
+  enabled: true
+  redis: default
+  max_len: 50000
+  coalesce:
+    user.presence:
+      window: 100ms
+      max_batch: 200
+    device.heartbeat:
+      window: 500ms
+      max_batch: 500
+```
 
 ### DbcacheProvider — `dbcache.<name>.*`
 

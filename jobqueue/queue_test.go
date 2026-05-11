@@ -54,6 +54,15 @@ func waitFor(cond func() bool, timeout time.Duration) bool {
 	return cond()
 }
 
+func mustList(t *testing.T, mr *miniredis.Miniredis, key string) []string {
+	t.Helper()
+	got, err := mr.List(key)
+	if err != nil {
+		t.Fatalf("List %s: %v", key, err)
+	}
+	return got
+}
+
 // TestQueue_PublishAndConsume 正常路径:Subscribe + Publish + Start,handler 拿到正确参数。
 func TestQueue_PublishAndConsume(t *testing.T) {
 	t.Parallel()
@@ -328,6 +337,47 @@ func TestQueue_StopBeforeStart(t *testing.T) {
 	}
 }
 
+// TestQueue_PublishAfterStopRejected Stop 后同步 topic 也必须统一拒绝 Publish。
+func TestQueue_PublishAfterStopRejected(t *testing.T) {
+	t.Parallel()
+	q, mr := newTestQueue(t)
+
+	if err := q.Publish(context.Background(), "sync", "before"); err != nil {
+		t.Fatalf("Publish before Stop: %v", err)
+	}
+	stopAndWait(t, q, 2*time.Second)
+	if err := q.Publish(context.Background(), "sync", "after"); !errors.Is(err, ErrStopped) {
+		t.Fatalf("expected ErrStopped after Stop, got %v", err)
+	}
+
+	got, _ := mr.List("jq:sync")
+	if len(got) != 1 || got[0] != `["before"]` {
+		t.Fatalf("LIST after stopped Publish = %v, want only before", got)
+	}
+}
+
+func TestQueue_StopConcurrent(t *testing.T) {
+	t.Parallel()
+	q, _ := newTestQueueWith(t, WithTopicCoalesce("c", time.Hour, 100))
+	if err := q.Publish(context.Background(), "c", "pending"); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case <-q.Stop():
+			case <-time.After(2 * time.Second):
+				t.Error("Stop timeout")
+			}
+		}()
+	}
+	wg.Wait()
+}
+
 // TestQueue_StopCancelsHandlerCtx Stop 应让 handler 收到 ctx.Done。
 func TestQueue_StopCancelsHandlerCtx(t *testing.T) {
 	t.Parallel()
@@ -429,19 +479,24 @@ func TestQueue_EmptyTopic(t *testing.T) {
 
 // stubMetrics 单测用的 Metrics 实现,记录调用次数与最后一次参数。
 type stubMetrics struct {
-	mu               sync.Mutex
-	publishTotal     map[string]int
-	publishDropped   map[string]int64 // 累计 dropped 数
-	publishDroppedN  int              // 调用次数
-	queueLen         map[string]int64 // 最后一次值
-	queueLenCalls    int
+	mu              sync.Mutex
+	publishTotal    map[string]int
+	publishDropped  map[string]int64 // 累计 dropped 数
+	publishDroppedN int              // 调用次数
+	dropReasons     map[DropReason]int64
+	queueLen        map[string]int64 // 最后一次值
+	queueLenCalls   int
+	coalesced       map[string]int64 // 累计合并条数
+	coalescedCalls  int              // flush 触发次数
 }
 
 func newStubMetrics() *stubMetrics {
 	return &stubMetrics{
 		publishTotal:   make(map[string]int),
 		publishDropped: make(map[string]int64),
+		dropReasons:    make(map[DropReason]int64),
 		queueLen:       make(map[string]int64),
+		coalesced:      make(map[string]int64),
 	}
 }
 
@@ -451,10 +506,11 @@ func (s *stubMetrics) PublishTotal(topic string) {
 	s.publishTotal[topic]++
 }
 
-func (s *stubMetrics) PublishDropped(topic string, n int64) {
+func (s *stubMetrics) PublishDropped(topic string, n int64, reason DropReason) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.publishDropped[topic] += n
+	s.dropReasons[reason] += n
 	s.publishDroppedN++
 }
 
@@ -463,6 +519,18 @@ func (s *stubMetrics) QueueLength(topic string, n int64) {
 	defer s.mu.Unlock()
 	s.queueLen[topic] = n
 	s.queueLenCalls++
+}
+
+func (s *stubMetrics) CoalesceFlushTotal(topic string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.coalescedCalls++
+}
+
+func (s *stubMetrics) CoalesceBatchSize(topic string, n int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.coalesced[topic] += n
 }
 
 // newTestQueueWith 用自定义 option 构造测试队列。
@@ -476,6 +544,41 @@ func newTestQueueWith(t *testing.T, opts ...QueueOption) (*Queue, *miniredis.Min
 		t.Fatalf("New: %v", err)
 	}
 	return q, mr
+}
+
+type slowEvalHook struct {
+	delay     time.Duration
+	active    atomic.Int32
+	maxActive atomic.Int32
+}
+
+func (h *slowEvalHook) DialHook(next redis.DialHook) redis.DialHook {
+	return next
+}
+
+func (h *slowEvalHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *slowEvalHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		switch cmd.Name() {
+		case "eval", "evalsha":
+			n := h.active.Add(1)
+			for {
+				old := h.maxActive.Load()
+				if n <= old || h.maxActive.CompareAndSwap(old, n) {
+					break
+				}
+			}
+			time.Sleep(h.delay)
+			err := next(ctx, cmd)
+			h.active.Add(-1)
+			return err
+		default:
+			return next(ctx, cmd)
+		}
+	}
 }
 
 // TestQueue_PublishMaxLen_TrimsOldest max_len=4,LPUSH 5 条,触发裁剪后保留 max/2=2 条。
@@ -622,6 +725,227 @@ func TestMetrics_NoopDefault(t *testing.T) {
 		if err := q.Publish(ctx, "t", i); err != nil {
 			t.Fatalf("Publish: %v", err)
 		}
+	}
+}
+
+// TestCoalesce_FlushBySize 配置 maxBatch=3、window=1s,Publish 4 次:
+// 第 3 次入队应立即触发 flush(batch=3),buf 残留 1 条;LIST 出现 3 条且顺序保留。
+func TestCoalesce_FlushBySize(t *testing.T) {
+	t.Parallel()
+	m := newStubMetrics()
+	q, mr := newTestQueueWith(t,
+		WithTopicCoalesce("c", time.Second, 3),
+		WithMetrics(m),
+	)
+	defer stopAndWait(t, q, 2*time.Second)
+
+	ctx := context.Background()
+	for i := range 4 {
+		if err := q.Publish(ctx, "c", i); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+	// 等异步 flush 完整跑完(LIST 写入 + 指标上报)。等 metric 而非 LIST size,
+	// 否则 LPUSH 在前、CoalesceFlushTotal 在后,会在 race window 里读到 calls=0。
+	if !waitFor(func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.coalescedCalls == 1
+	}, 2*time.Second) {
+		t.Fatalf("flush did not complete in time, coalescedCalls=%d", m.coalescedCalls)
+	}
+	got, _ := mr.List("jq:c")
+	if len(got) != 3 {
+		t.Fatalf("LIST len = %d, want 3", len(got))
+	}
+	// LPUSH v0 v1 v2 后 list=[v2,v1,v0],BRPOP 顺序读出 v0,v1,v2 — 顺序保留
+	if got[0] != `[2]` || got[1] != `[1]` || got[2] != `[0]` {
+		t.Fatalf("LIST = %v, want [[2],[1],[0]] (LPUSH 头插)", got)
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.publishTotal["c"] != 4 {
+		t.Fatalf("PublishTotal = %d, want 4 (4 次入队即计 4 次)", m.publishTotal["c"])
+	}
+	if m.coalescedCalls != 1 {
+		t.Fatalf("CoalesceFlushTotal calls = %d, want 1 (一次 size 触发的 flush)", m.coalescedCalls)
+	}
+	if m.coalesced["c"] != 3 {
+		t.Fatalf("CoalesceBatchSize sum = %d, want 3", m.coalesced["c"])
+	}
+}
+
+// TestCoalesce_FlushByTimer 配置 window=80ms、maxBatch=999,Publish 1 次,
+// sleep 200ms 后 LIST 应出现 1 条。
+func TestCoalesce_FlushByTimer(t *testing.T) {
+	t.Parallel()
+	m := newStubMetrics()
+	q, mr := newTestQueueWith(t,
+		WithTopicCoalesce("c", 80*time.Millisecond, 999),
+		WithMetrics(m),
+	)
+	defer stopAndWait(t, q, 2*time.Second)
+
+	if err := q.Publish(context.Background(), "c", "ping"); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+	// 等 metric(同 size 触发的测试,理由相同):LPUSH 与 CoalesceFlushTotal 之间有 race window。
+	if !waitFor(func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.coalescedCalls == 1
+	}, 2*time.Second) {
+		t.Fatalf("flush did not complete in time, coalescedCalls=%d", m.coalescedCalls)
+	}
+	got, _ := mr.List("jq:c")
+	if len(got) != 1 {
+		t.Fatalf("LIST len = %d, want 1", len(got))
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.coalesced["c"] != 1 {
+		t.Fatalf("CoalesceBatchSize sum=%d, want 1", m.coalesced["c"])
+	}
+}
+
+// TestCoalesce_StopDrains window=10s,Publish 2 条不到 maxBatch,Stop 应 flush 残留。
+// Stop 后再 Publish 必须返回 ErrStopped,不再记成功或 dropped 指标。
+func TestCoalesce_StopDrains(t *testing.T) {
+	t.Parallel()
+	m := newStubMetrics()
+	q, mr := newTestQueueWith(t,
+		WithTopicCoalesce("c", 10*time.Second, 999),
+		WithMetrics(m),
+	)
+
+	ctx := context.Background()
+	for _, msg := range []string{"a", "b"} {
+		if err := q.Publish(ctx, "c", msg); err != nil {
+			t.Fatalf("Publish %s: %v", msg, err)
+		}
+	}
+	stopAndWait(t, q, 2*time.Second)
+
+	got, _ := mr.List("jq:c")
+	if len(got) != 2 || got[0] != `["b"]` || got[1] != `["a"]` {
+		t.Fatalf("LIST = %v, want [[\"b\"],[\"a\"]] after Stop drain", got)
+	}
+
+	// Stop 后再 Publish 必须拒绝,不再写 LIST。
+	if err := q.Publish(ctx, "c", "after"); !errors.Is(err, ErrStopped) {
+		t.Fatalf("expected ErrStopped after Stop, got %v", err)
+	}
+	got2, _ := mr.List("jq:c")
+	if len(got2) != 2 {
+		t.Fatalf("LIST grew after Stop, len=%d (want 2)", len(got2))
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.coalescedCalls != 1 || m.coalesced["c"] != 2 {
+		t.Fatalf("CoalesceFlushTotal calls=%d batch_sum=%d, want calls=1 sum=2", m.coalescedCalls, m.coalesced["c"])
+	}
+	if m.publishDropped["c"] != 0 {
+		t.Fatalf("PublishDropped sum = %d, want 0 (after-Stop returns error)", m.publishDropped["c"])
+	}
+}
+
+func TestCoalesce_PublishCanceledContextRejected(t *testing.T) {
+	t.Parallel()
+	m := newStubMetrics()
+	q, mr := newTestQueueWith(t,
+		WithTopicCoalesce("c", 50*time.Millisecond, 2),
+		WithMetrics(m),
+	)
+	defer stopAndWait(t, q, 2*time.Second)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := q.Publish(ctx, "c", "lost"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if mr.Exists("jq:c") {
+		t.Fatalf("LIST should not exist for canceled Publish, got %v", mustList(t, mr, "jq:c"))
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.publishTotal["c"] != 0 {
+		t.Fatalf("PublishTotal = %d, want 0 for canceled Publish", m.publishTotal["c"])
+	}
+}
+
+func TestCoalesce_MaxLenMatchesRepeatedPublish(t *testing.T) {
+	t.Parallel()
+	m := newStubMetrics()
+	q, mr := newTestQueueWith(t,
+		WithDefaultMaxLen(10),
+		WithTopicCoalesce("c", time.Second, 12),
+		WithMetrics(m),
+	)
+	defer stopAndWait(t, q, 2*time.Second)
+
+	for i := range 12 {
+		if err := q.Publish(context.Background(), "c", i); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+	if !waitFor(func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.coalescedCalls == 1
+	}, 2*time.Second) {
+		t.Fatalf("coalesced flush did not complete, calls=%d", m.coalescedCalls)
+	}
+
+	got := mustList(t, mr, "jq:c")
+	want := []string{`[11]`, `[10]`, `[9]`, `[8]`, `[7]`, `[6]`}
+	if len(got) != len(want) {
+		t.Fatalf("LIST len=%d, want %d, list=%v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("LIST[%d]=%s, want %s; full list=%v", i, got[i], want[i], got)
+		}
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.publishDropped["c"] != 6 {
+		t.Fatalf("PublishDropped sum=%d, want 6", m.publishDropped["c"])
+	}
+	if m.dropReasons[DropReasonOverflow] != 6 {
+		t.Fatalf("overflow dropped=%d, want 6", m.dropReasons[DropReasonOverflow])
+	}
+}
+
+func TestCoalesce_FlushesSeriallyPerTopic(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	hook := &slowEvalHook{delay: 40 * time.Millisecond}
+	client.AddHook(hook)
+
+	q, err := New(client, "jq:", WithTopicCoalesce("c", time.Hour, 2))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	for i := range 10 {
+		if err := q.Publish(context.Background(), "c", i); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+	stopAndWait(t, q, 3*time.Second)
+
+	if got := hook.maxActive.Load(); got != 1 {
+		t.Fatalf("max concurrent Redis script calls=%d, want 1", got)
+	}
+	if got := len(mustList(t, mr, "jq:c")); got != 10 {
+		t.Fatalf("LIST len=%d, want 10", got)
 	}
 }
 

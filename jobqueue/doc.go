@@ -15,6 +15,13 @@
 // —— 这是消费者宕机或处理跟不上的核心信号。OTel 接入显式
 // jobqueue.WithMetrics(jobqueue.NewOTelMetrics())。
 //
+// 合并模式:对单条无关紧要、关心吞吐的 topic 用
+// WithTopicCoalesce(topic, window, maxBatch) 切到内存缓冲 + 批量 LPUSH。
+// Redis 最终结果与 N 次 Publish 等价 (顺序保留、LTRIM high/low watermark 仍逐条生效),
+// 消费端 handler 形态不变。合并模式下 Publish 只表示 payload 已进入内存缓冲;
+// flush 失败仅记日志和 PublishDropped(..., DropReasonFlushFailed) 指标,进程崩溃会丢缓冲。
+// 重要事件(支付、状态扣减)勿用,典型适用:在线状态、心跳、埋点。
+//
 // fn 必须形如 func(ctx context.Context, ...) error —— 第一个参数固定 context.Context,
 // 出参恰好 1 个 error,其它入参类型任意。Publish 必须按相同顺序传值。
 package jobqueue

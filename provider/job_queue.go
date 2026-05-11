@@ -22,9 +22,12 @@ const jobqueueDefaultRedisName = "default"
 //   - jobqueue.max_len 设全局 LIST 长度上限 (0 = 不限);超限时 Publish 自动 LTRIM 丢最老消息,
 //     被丢数量通过 OTel 指标 jobqueue.publish.dropped 上报。需要 per-topic 覆盖请业务方
 //     自行 jobqueue.New(... WithTopicMaxLen(...))。
+//   - jobqueue.coalesce.<topic>.{window, max_batch} 给 topic 开合并模式:
+//     Publish 转 fire-and-forget,缓冲到上限或时间窗后批量 LPUSH。
+//     缺一项或非法值跳过并 warn,适合在线状态/心跳等"单条不重要"事件。
 //   - metrics instrumentation 开启时接 jobqueue.NewOTelMetrics();否则使用 NoopMetrics
 //   - Serve 仅在 enabled 时启动 worker 并阻塞到 ctx 取消
-//   - Shutdown 通过 queue.Stop() 等待 worker 收尾,超时阈值 jobqueue.shutdown_timeout
+//   - Shutdown 通过 queue.Stop() 等待 worker 与 coalesce drain 收尾,超时阈值 jobqueue.shutdown_timeout
 type JobQueueProvider struct {
 	enabled         bool
 	queue           *jobqueue.Queue
@@ -57,6 +60,27 @@ func (p *JobQueueProvider) Register(ctx context.Context) error {
 		opts = append(opts, jobqueue.WithMetrics(jobqueue.NewOTelMetrics()))
 	}
 
+	// jobqueue.coalesce.<topic>.{window, max_batch} 解析:每个 topic 一项配置。
+	// 缺项或非法值仅 warn 跳过,不阻塞 provider 启动 — 默认行为(同步 LPUSH)仍可用。
+	coalesceMap := v.GetStringMap("jobqueue.coalesce")
+	coalesceCount := 0
+	for topic := range coalesceMap {
+		prefix := "jobqueue.coalesce." + topic
+		window := v.GetDuration(prefix + ".window")
+		maxBatch := v.GetInt(prefix + ".max_batch")
+		if window <= 0 || maxBatch <= 1 {
+			log.Ctx(ctx).Warn().
+				Str("provider", "jobqueue").
+				Str("topic", topic).
+				Dur("window", window).
+				Int("max_batch", maxBatch).
+				Msg("jobqueue: invalid coalesce config (window>0 and max_batch>1 required), skipped")
+			continue
+		}
+		opts = append(opts, jobqueue.WithTopicCoalesce(topic, window, maxBatch))
+		coalesceCount++
+	}
+
 	q, err := jobqueue.New(client, keyPrefix, opts...)
 	if err != nil {
 		return err
@@ -69,6 +93,7 @@ func (p *JobQueueProvider) Register(ctx context.Context) error {
 		Str("redis", redisName).
 		Str("key_prefix", keyPrefix).
 		Int("max_len", maxLen).
+		Int("coalesce_topics", coalesceCount).
 		Dur("shutdown_timeout", p.shutdownTimeout).
 		Msg("jobqueue registered")
 	return nil

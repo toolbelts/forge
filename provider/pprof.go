@@ -28,6 +28,10 @@ import (
 // 显式给每个 runtime/pprof 注册的 profile（heap / goroutine / allocs / threadcreate /
 // block / mutex 及业务自定义）单独 mount，再单独挂 cmdline / profile / symbol / trace。
 // Index 渲染的 HTML 使用相对链接，所以在任意前缀下都能跳转到对应子路由。
+//
+// 默认采样：mutex_fraction=100、block_rate=10000(ns)，开箱可用且开销 < 1%。
+// 显式写 0 可关闭对应采样。threadcreate 路由由 runtime/pprof 默认注册但数据始终
+// 为空（golang/go#6104，Go runtime 自身缺陷，与本框架无关）。
 type PprofProvider struct {
 	enabled       bool
 	mountPrefix   string
@@ -55,8 +59,18 @@ func (p *PprofProvider) Register(ctx context.Context) error {
 	if p.mountPrefix == "" {
 		p.mountPrefix = "/debug/pprof/"
 	}
-	p.mutexFraction = v.GetInt("pprof.mutex_fraction")
-	p.blockRate = v.GetInt("pprof.block_rate")
+	// GetInt 缺失时返回 0 会误关采样,所以默认非零的开关必须 IsSet 守卫;
+	// 显式配 0 表示用户主动关闭采样,予以保留。
+	if v.IsSet("pprof.mutex_fraction") {
+		p.mutexFraction = v.GetInt("pprof.mutex_fraction")
+	} else {
+		p.mutexFraction = 100
+	}
+	if v.IsSet("pprof.block_rate") {
+		p.blockRate = v.GetInt("pprof.block_rate")
+	} else {
+		p.blockRate = 10000
+	}
 	return nil
 }
 

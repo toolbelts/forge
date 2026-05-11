@@ -274,10 +274,12 @@ otelgrpc client stats handler 默认在 `trace.enabled` 或 `metrics.enabled` �
 |---|---|---|---|
 | `enabled` | bool | `false` | 实际生效需同时满足 `http.enabled=true` |
 | `path_prefix` | string | `/debug/pprof/` | 挂载前缀 |
-| `mutex_fraction` | int | `0`(不采样) | `runtime.SetMutexProfileFraction` |
-| `block_rate` | int | `0`(不采样) | `runtime.SetBlockProfileRate` |
+| `mutex_fraction` | int | `100`(1/100 抽样) | `runtime.SetMutexProfileFraction`,显式设 `0` 关闭 |
+| `block_rate` | int | `10000`(≥10µs 阻塞才采样) | `runtime.SetBlockProfileRate`,显式设 `0` 关闭 |
 
 ⚠️ pprof 与业务 HTTP 共端口,生产环境通过反向代理 / ACL 屏蔽路径,或 `pprof.enabled=false`。
+
+ℹ️ `threadcreate` profile 路由由 Go `runtime/pprof` 默认注册,但因 [golang/go#6104](https://github.com/golang/go/issues/6104) 数据始终为空,与本框架无关。
 
 ### TokenProvider — `token.*`
 

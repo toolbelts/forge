@@ -58,6 +58,10 @@ func (p *DatabaseProvider) Register(ctx context.Context) error {
 			db.AddQueryHook(bunotel.NewQueryHook(bunotel.WithDBName(name)))
 		}
 
+		if v.GetBool(prefix + ".debug") {
+			db.AddQueryHook(&debugQueryHook{name: name})
+		}
+
 		if slow := v.GetDuration(prefix + ".slow"); slow > 0 {
 			db.AddQueryHook(&slowQueryHook{name: name, threshold: slow})
 		}
@@ -99,6 +103,28 @@ func GetDb(ctx context.Context, name string) (*bun.DB, error) {
 // MustGetDb 从容器获取指定名称的数据库句柄，缺失时 panic。
 func MustGetDb(ctx context.Context, name string) *bun.DB {
 	return ioc.MustGetNamed[*bun.DB](ctx, name)
+}
+
+// debugQueryHook bun 全量查询钩子，以 zerolog debug 级别记录每条 SQL。
+type debugQueryHook struct {
+	name string
+}
+
+// BeforeQuery 钩子前置回调，仅透传 ctx。
+func (h *debugQueryHook) BeforeQuery(ctx context.Context, e *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+// AfterQuery 钩子后置回调，以 debug 级别输出 SQL、耗时与错误。
+func (h *debugQueryHook) AfterQuery(ctx context.Context, e *bun.QueryEvent) {
+	ev := log.Ctx(ctx).Debug().
+		Str("db_name", h.name).
+		Dur("duration", time.Since(e.StartTime)).
+		Str("query", e.Query)
+	if e.Err != nil {
+		ev = ev.Err(e.Err)
+	}
+	ev.Msg("sql query")
 }
 
 // slowQueryHook bun 慢查询钩子，超过阈值时用 zerolog warn 记录。

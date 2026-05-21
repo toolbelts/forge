@@ -219,8 +219,9 @@ trace 自动插桩配置:
 | `conn_max_lifetime` | duration | — | |
 | `conn_max_idle_time` | duration | — | |
 | `slow` | duration | — | 超过阈值的查询用 zerolog warn 记录 |
+| `debug` | bool | — | 开启后每条 SQL 以 zerolog debug 记录(需全局 `log.level=debug` 才可见);与 `slow` 独立,可同时开启 |
 
-启动时 `PingContext`,失败立即返回错误。bunotel query hook 默认在 `trace.enabled` 或 `metrics.enabled` 任一开启时挂载,也可用 `trace.instrumentation.database` / `metrics.instrumentation.database` 单独覆盖。
+启动时 `PingContext`,失败立即返回错误。bunotel query hook 默认在 `trace.enabled` 或 `metrics.enabled` 任一开启时挂载,也可用 `trace.instrumentation.database` / `metrics.instrumentation.database` 单独覆盖。`debug` 与 `slow` 互不替代:`debug` 输出全部查询(debug 级),`slow` 仅突出超阈值查询(warn 级)。
 
 ### GrpcProvider — `grpc.*`
 

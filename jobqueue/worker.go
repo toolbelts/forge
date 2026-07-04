@@ -50,7 +50,11 @@ func (q *Queue) brpopLoop(ctx context.Context, h *handler) {
 			sleep(ctx, errBackoff)
 			continue
 		}
-		if len(res) < 2 {
+		if len(res) != 2 {
+			log.Ctx(ctx).Error().
+				Str("topic", h.topic).
+				Int("len", len(res)).
+				Msg("jobqueue: unexpected brpop reply shape, skipped")
 			continue
 		}
 		h.dispatch(ctx, []byte(res[1]))

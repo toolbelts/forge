@@ -808,6 +808,35 @@ func TestCoalesce_FlushByTimer(t *testing.T) {
 	}
 }
 
+// TestCoalesce_FlushFailureDropped Redis 不可用时 flush 失败,
+// 整批计入 dropped(FlushFailed),Publish 本身不报错(合并模式语义)。
+func TestCoalesce_FlushFailureDropped(t *testing.T) {
+	t.Parallel()
+	m := newStubMetrics()
+	q, mr := newTestQueueWith(t,
+		WithTopicCoalesce("c", time.Second, 2),
+		WithMetrics(m),
+	)
+	defer stopAndWait(t, q, 5*time.Second)
+
+	mr.Close() // 模拟 Redis 故障;coalesce 的 Publish 只进内存缓冲,不感知
+	ctx := context.Background()
+	for i := range 2 { // 攒满 maxBatch 触发立即 flush
+		if err := q.Publish(ctx, "c", i); err != nil {
+			t.Fatalf("Publish %d: %v", i, err)
+		}
+	}
+	if !waitFor(func() bool {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		return m.dropReasons[DropReasonFlushFailed] == 2
+	}, 4*time.Second) {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		t.Fatalf("expected 2 dropped with reason flush_failed, got %v", m.dropReasons)
+	}
+}
+
 // TestCoalesce_StopDrains window=10s,Publish 2 条不到 maxBatch,Stop 应 flush 残留。
 // Stop 后再 Publish 必须返回 ErrStopped,不再记成功或 dropped 指标。
 func TestCoalesce_StopDrains(t *testing.T) {

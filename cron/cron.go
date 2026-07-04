@@ -22,6 +22,7 @@ type Cron struct {
 	mu      sync.Mutex
 	rootCtx context.Context
 	cancel  context.CancelFunc
+	started bool
 }
 
 // New 用给定时区构造调度器。loc 为 nil 时使用 time.Local。
@@ -78,13 +79,20 @@ func (c *Cron) AddJob(name, spec string, fn Func) (rcron.EntryID, error) {
 }
 
 // Start 启动调度(非阻塞)。parent 作为任务函数的父 ctx,Stop 时会被取消。
+// 已在运行时再次 Start 是 no-op,避免误调用 cancel 掉运行中任务的 ctx;
+// Stop 之后可再 Start 重启。
 func (c *Cron) Start(parent context.Context) {
 	c.mu.Lock()
+	if c.started {
+		c.mu.Unlock()
+		return
+	}
 	// 用新的 parent 重建 rootCtx,旧的 cancel 触发以防漏挂。
 	c.cancel()
 	rootCtx, cancel := context.WithCancel(parent)
 	c.rootCtx = rootCtx
 	c.cancel = cancel
+	c.started = true
 	c.mu.Unlock()
 	c.raw.Start()
 }
@@ -94,6 +102,7 @@ func (c *Cron) Start(parent context.Context) {
 func (c *Cron) Stop() context.Context {
 	c.mu.Lock()
 	c.cancel()
+	c.started = false
 	c.mu.Unlock()
 	return c.raw.Stop()
 }

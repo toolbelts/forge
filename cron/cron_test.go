@@ -142,6 +142,59 @@ func TestCron_StopCancelsJobCtx(t *testing.T) {
 	}
 }
 
+// TestCron_DoubleStartNoop 运行中重复 Start 应为 no-op,不能重建/取消 rootCtx,
+// 否则会腰斩正在运行任务感知的 ctx。
+func TestCron_DoubleStartNoop(t *testing.T) {
+	t.Parallel()
+
+	c := New(time.UTC)
+	c.Start(context.Background())
+	defer waitStop(t, c, 2*time.Second)
+
+	c.mu.Lock()
+	first := c.rootCtx
+	c.mu.Unlock()
+
+	c.Start(context.Background())
+
+	c.mu.Lock()
+	second := c.rootCtx
+	c.mu.Unlock()
+	if first != second {
+		t.Fatal("expected second Start to be a no-op, but rootCtx was rebuilt")
+	}
+	if first.Err() != nil {
+		t.Fatalf("expected running rootCtx to stay alive, got %v", first.Err())
+	}
+}
+
+// TestCron_RestartAfterStop Stop 之后可以再次 Start,任务恢复触发。
+func TestCron_RestartAfterStop(t *testing.T) {
+	t.Parallel()
+
+	c := New(time.UTC)
+	var count atomic.Int32
+	if _, err := c.AddJob("ping", "@every 1s", func(ctx context.Context) error {
+		count.Add(1)
+		return nil
+	}); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+
+	c.Start(context.Background())
+	if !waitFor(func() bool { return count.Load() >= 1 }, 4*time.Second) {
+		t.Fatal("job did not fire before Stop")
+	}
+	waitStop(t, c, 2*time.Second)
+
+	before := count.Load()
+	c.Start(context.Background())
+	defer waitStop(t, c, 2*time.Second)
+	if !waitFor(func() bool { return count.Load() > before }, 4*time.Second) {
+		t.Fatal("job did not fire after restart")
+	}
+}
+
 // TestCron_BadSpecReturnsError 非法表达式应返回错误。
 func TestCron_BadSpecReturnsError(t *testing.T) {
 	t.Parallel()

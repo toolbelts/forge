@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 
 	"github.com/rs/zerolog/log"
 )
@@ -67,12 +68,12 @@ type multiNotifier struct {
 }
 
 func (m *multiNotifier) Send(ctx context.Context, title, content string) error {
-	var lastErr error
+	var errs []error
 	for _, n := range m.notifiers {
 		if err := n.Send(ctx, title, content); err != nil {
 			log.Error().Err(err).Msg("notifier send failed")
-			lastErr = err
+			errs = append(errs, err)
 		}
 	}
-	return lastErr
+	return errors.Join(errs...)
 }

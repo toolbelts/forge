@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/go-resty/resty/v2"
+	"resty.dev/v3"
 )
 
 // htmlTagRe 匹配 HTML 标签，用于向飞书发送前剥离格式标记
@@ -42,7 +42,7 @@ func (l *larkNotifier) Send(ctx context.Context, title, content string) error {
 	if err != nil {
 		return fmt.Errorf("lark send failed: %w", err)
 	}
-	if !resp.IsSuccess() {
+	if !resp.IsStatusSuccess() {
 		return fmt.Errorf("lark send failed: status=%d body=%s", resp.StatusCode(), resp.String())
 	}
 	return nil

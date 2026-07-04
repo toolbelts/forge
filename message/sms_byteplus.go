@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-resty/resty/v2"
+	"resty.dev/v3"
 	"github.com/goccy/go-json"
 )
 
@@ -155,7 +155,7 @@ func (b *bytePlusSender) Send(ctx context.Context, msg SmsMessage) error {
 	if err != nil {
 		return fmt.Errorf("message: byteplus send: %w", err)
 	}
-	if !resp.IsSuccess() {
+	if !resp.IsStatusSuccess() {
 		return fmt.Errorf("message: byteplus send status=%d body=%s",
 			resp.StatusCode(), resp.String())
 	}

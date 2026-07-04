@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/go-resty/resty/v2"
+	"resty.dev/v3"
 )
 
 // twilioBaseURL 是 Twilio Messages API 的默认根地址,测试可改成 httptest.Server URL。
@@ -65,7 +65,7 @@ func (t *twilioSender) Send(ctx context.Context, msg SmsMessage) error {
 	if err != nil {
 		return fmt.Errorf("message: twilio send to %s: %w", msg.To, err)
 	}
-	if !resp.IsSuccess() {
+	if !resp.IsStatusSuccess() {
 		return fmt.Errorf("message: twilio send to %s status=%d body=%s",
 			msg.To, resp.StatusCode(), resp.String())
 	}

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/go-resty/resty/v2"
+	"resty.dev/v3"
 )
 
 // telegramNotifier 通过 Telegram Bot API 发送通知
@@ -42,7 +42,7 @@ func (t *telegramNotifier) Send(ctx context.Context, title, content string) erro
 	if err != nil {
 		return fmt.Errorf("telegram send failed: %w", err)
 	}
-	if !resp.IsSuccess() {
+	if !resp.IsStatusSuccess() {
 		return fmt.Errorf("telegram send failed: status=%d body=%s", resp.StatusCode(), resp.String())
 	}
 	return nil

@@ -6,7 +6,6 @@ require (
 	buf.build/go/protovalidate v1.2.0
 	github.com/alicebob/miniredis/v2 v2.37.0
 	github.com/fsnotify/fsnotify v1.10.0
-	github.com/go-resty/resty/v2 v2.17.2
 	github.com/goccy/go-json v0.10.6
 	github.com/google/uuid v1.6.0
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0
@@ -35,6 +34,7 @@ require (
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478
 	google.golang.org/grpc v1.80.0
 	google.golang.org/protobuf v1.36.11
+	resty.dev/v3 v3.0.0-rc.2
 )
 
 require (

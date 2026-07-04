@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-resty/resty/v2"
+	"resty.dev/v3"
 	"github.com/goccy/go-json"
 )
 
@@ -137,14 +137,14 @@ func (a *aliyunCnSmsSender) Send(ctx context.Context, msg SmsMessage) error {
 	if err != nil {
 		return fmt.Errorf("message: aliyun-cn send: %w", err)
 	}
-	if !resp.IsSuccess() {
+	if !resp.IsStatusSuccess() {
 		return fmt.Errorf("message: aliyun-cn status=%d body=%s",
 			resp.StatusCode(), resp.String())
 	}
 
 	// 200 也可能业务失败 (Code != "OK"),不解析 body 会静默吞错。
 	var body aliyunCnSmsResponse
-	if err := json.Unmarshal(resp.Body(), &body); err != nil {
+	if err := json.Unmarshal(resp.Bytes(), &body); err != nil {
 		return fmt.Errorf("message: aliyun-cn parse response: %w (body=%s)", err, resp.String())
 	}
 	if body.Code != aliyunCnSmsBizCodeOk {

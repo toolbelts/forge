@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-resty/resty/v2"
+	"resty.dev/v3"
 )
 
 // Aliyun 国际版 SendMessageToGlobe(Dysmsapi 2018-05-01)走 V1 签名:
@@ -102,7 +102,7 @@ func (a *aliyunSmsSender) Send(ctx context.Context, msg SmsMessage) error {
 	if err != nil {
 		return fmt.Errorf("message: aliyun-sms send to %s: %w", msg.To, err)
 	}
-	if !resp.IsSuccess() {
+	if !resp.IsStatusSuccess() {
 		return fmt.Errorf("message: aliyun-sms send to %s status=%d body=%s",
 			msg.To, resp.StatusCode(), resp.String())
 	}

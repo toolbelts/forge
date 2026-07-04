@@ -4,7 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"sort"
+	"maps"
+	"slices"
 
 	"github.com/uptrace/bun/migrate"
 )
@@ -67,10 +68,5 @@ func (s *Set) For(dbName string) (*migrate.Migrations, bool) {
 
 // Names 返回已注册的 db 名,字典序排序,便于错误信息和日志稳定输出。
 func (s *Set) Names() []string {
-	out := make([]string, 0, len(s.byName))
-	for name := range s.byName {
-		out = append(out, name)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(s.byName))
 }

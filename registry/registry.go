@@ -3,7 +3,8 @@ package registry
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
+	"strings"
 	"time"
 
 	json "github.com/goccy/go-json"
@@ -92,8 +93,8 @@ func (m *Manager) Resolve(ctx context.Context, service string) ([]Instance, erro
 	}
 
 	// 按 id 排序,保证调用方比较前后两次结果时不受 SCAN 顺序抖动影响。
-	sort.Slice(instances, func(i, j int) bool {
-		return instances[i].Id < instances[j].Id
+	slices.SortFunc(instances, func(a, b Instance) int {
+		return strings.Compare(a.Id, b.Id)
 	})
 	return instances, nil
 }

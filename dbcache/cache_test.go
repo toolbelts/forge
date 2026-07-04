@@ -115,11 +115,9 @@ func TestCache_Singleflight(t *testing.T) {
 	const N = 100
 	var wg sync.WaitGroup
 	for range N {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = c.Get(ctx, 42)
-		}()
+		})
 	}
 	wg.Wait()
 	if calls.Load() != 1 {

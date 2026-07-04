@@ -416,7 +416,7 @@ func TestDelete_Idempotent(t *testing.T) {
 func TestDeleteByUser(t *testing.T) {
 	mr, mgr := newTestManager(t)
 	created := make([]*Token, 0, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		token, err := mgr.Create(context.Background(), 42, nil)
 		if err != nil {
 			t.Fatalf("create %d: %v", i, err)
@@ -443,7 +443,7 @@ func TestDeleteByUser(t *testing.T) {
 func TestListByUser(t *testing.T) {
 	_, mgr := newTestManager(t)
 	created := make([]*Token, 0, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		token, err := mgr.Create(context.Background(), 7, map[string]string{"device": fmt.Sprintf("dev-%d", i)})
 		if err != nil {
 			t.Fatalf("create: %v", err)
@@ -575,15 +575,13 @@ func TestConcurrentRefresh(t *testing.T) {
 		success atomic.Int64
 	)
 	start := make(chan struct{})
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range workers {
+		wg.Go(func() {
 			<-start
 			if _, err := mgr.Refresh(context.Background(), token.RefreshToken); err == nil {
 				success.Add(1)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

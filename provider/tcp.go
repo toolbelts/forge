@@ -75,12 +75,10 @@ func (p *TcpProvider) Serve(ctx context.Context) error {
 			return err
 		}
 
-		p.wg.Add(1)
-		go func(c net.Conn) {
-			defer p.wg.Done()
-			defer c.Close()
-			handler.HandleConn(ctx, c)
-		}(conn)
+		p.wg.Go(func() {
+			defer conn.Close()
+			handler.HandleConn(ctx, conn)
+		})
 	}
 }
 

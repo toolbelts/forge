@@ -365,15 +365,13 @@ func TestQueue_StopConcurrent(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			select {
 			case <-q.Stop():
 			case <-time.After(2 * time.Second):
 				t.Error("Stop timeout")
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }

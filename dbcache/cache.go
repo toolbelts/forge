@@ -417,9 +417,8 @@ func (c *Cache[K, V]) loadEach(ctx context.Context, ks []K, sks []string, into m
 		firstErr error
 	)
 	for i := range ks {
-		wg.Add(1)
-		go func(k K, sk string) {
-			defer wg.Done()
+		k, sk := ks[i], sks[i]
+		wg.Go(func() {
 			v, err := c.loadOne(ctx, k, sk)
 			mu.Lock()
 			defer mu.Unlock()
@@ -433,7 +432,7 @@ func (c *Cache[K, V]) loadEach(ctx context.Context, ks []K, sks []string, into m
 				return
 			}
 			into[k] = v
-		}(ks[i], sks[i])
+		})
 	}
 	wg.Wait()
 	return into, firstErr

@@ -8,8 +8,9 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -117,11 +118,7 @@ func (a *aliyunSmsSender) Send(ctx context.Context, msg SmsMessage) error {
 // 其中 canonicalQuery 是按 key 排序的 pe(k)=pe(v) 串,pe 为 Aliyun 严格百分号编码
 // (RFC 3986 + "+"→"%20" + "*"→"%2A" + "%7E"→"~")。
 func aliyunSignV1(method string, params url.Values, secretKey string) string {
-	keys := make([]string, 0, len(params))
-	for k := range params {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(params))
 
 	var canonical strings.Builder
 	for i, k := range keys {

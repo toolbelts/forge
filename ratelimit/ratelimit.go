@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"regexp"
 	"slices"
 	"strings"
@@ -458,11 +459,7 @@ func (s *RedisRuleStore) LoadRules(ctx context.Context) ([]Rule, error) {
 		return nil, err
 	}
 
-	names := make([]string, 0, len(values))
-	for name := range values {
-		names = append(names, name)
-	}
-	slices.Sort(names)
+	names := slices.Sorted(maps.Keys(values))
 
 	rules := make([]Rule, 0, len(values))
 	for _, name := range names {

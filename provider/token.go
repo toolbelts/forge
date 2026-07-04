@@ -28,9 +28,9 @@ const tokenDefaultRedisName = "default"
 // 白名单两档:
 //   - skips         完全跳过 token 校验,handler 收到的 ctx 中 user_id == 0
 //   - optional_skips 软鉴权:命中后,缺 token 或凭证类校验失败均静默降级为
-//                    匿名(handler 收到 user_id == 0),token 有效则正常写
-//                    user_id;Redis/网络等系统错误不被静默,继续透传。
-//                    适用于"既可登录调、也可匿名调"的 RPC(如发送验证码)。
+//     匿名(handler 收到 user_id == 0),token 有效则正常写
+//     user_id;Redis/网络等系统错误不被静默,继续透传。
+//     适用于"既可登录调、也可匿名调"的 RPC(如发送验证码)。
 //
 // 同一 RPC 同时命中 skips 与 optional_skips 时,skips 优先(更宽松,不查 token)。
 //
@@ -126,9 +126,9 @@ func (p *TokenProvider) Setup(ctx context.Context) error {
 //
 // 错误映射(统一对外暴露 UNAUTHENTICATED,前端只需一个"重新登录"分支):
 //   - 缺 token / 不存在 / 过期 / 载荷损坏  → UNAUTHENTICATED(strict 模式)
-//                                          → 匿名放行(optional 模式)
+//     → 匿名放行(optional 模式)
 //   - 其它(Redis/网络等)                   → 透传给 ErrorProvider 归一化为 INTERNAL
-//                                          (无论 strict 还是 optional 都不静默)
+//     (无论 strict 还是 optional 都不静默)
 //
 // 真实 token 失败原因仍通过 WithCause 挂在 BizError 上,服务端日志可排查,但不向客户端暴露。
 func tokenUnaryInterceptor(

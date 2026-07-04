@@ -134,14 +134,12 @@ func TestMemoryStore_ConcurrentSafety(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for i := range 50 {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			key := []byte{byte(i % 10)}
 			_ = s.Set(ctx, string(key), Item{Value: key}, time.Minute)
 			_, _, _ = s.Get(ctx, string(key))
 			_ = s.Delete(ctx, string(key))
-		}(i)
+		})
 	}
 	wg.Wait()
 }

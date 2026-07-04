@@ -19,9 +19,8 @@ var popTimeout = 5 * time.Second
 var errBackoff = 200 * time.Millisecond
 
 // runWorker 单个 worker 的主循环。根据 handler.batch 选 BRPOP / BLMPOP。
+// 由 q.wg.Go 派生,退出即计数归还。
 func (q *Queue) runWorker(ctx context.Context, h *handler) {
-	defer q.wg.Done()
-
 	if h.batch > 1 {
 		q.blmpopLoop(ctx, h)
 		return

@@ -128,10 +128,7 @@ func (c *coalescer) takeLocked() [][]byte {
 		c.timer.Stop()
 		c.timer = nil
 	}
-	n := len(c.buf)
-	if n > c.cfg.maxBatch {
-		n = c.cfg.maxBatch
-	}
+	n := min(len(c.buf), c.cfg.maxBatch)
 	batch := append([][]byte(nil), c.buf[:n]...)
 	c.buf = c.buf[n:]
 	return batch
@@ -145,12 +142,10 @@ func (c *coalescer) startFlushLocked() {
 	}
 	c.flushing = true
 	c.flushRequested = false
-	c.queue.wg.Add(1)
-	go c.flushLoop(batch)
+	c.queue.wg.Go(func() { c.flushLoop(batch) })
 }
 
 func (c *coalescer) flushLoop(batch [][]byte) {
-	defer c.queue.wg.Done()
 	for {
 		c.flush(batch)
 

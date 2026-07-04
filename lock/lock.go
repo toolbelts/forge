@@ -156,7 +156,7 @@ func (l *Locker) Lock(ctx context.Context) error {
 	}
 	timer := time.NewTimer(l.retryInterval)
 	defer timer.Stop()
-	for i := 0; i < l.retry; i++ {
+	for range l.retry {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()

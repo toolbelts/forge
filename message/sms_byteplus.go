@@ -2,17 +2,15 @@ package message
 
 import (
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
+	"maps"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
-	"resty.dev/v3"
 	"github.com/goccy/go-json"
+	"resty.dev/v3"
 )
 
 // BytePlus SMS OpenAPI 走 Volcengine V4 签名,字段名沿用控制台 / 文档大写驼峰。
@@ -165,11 +163,7 @@ func (b *bytePlusSender) Send(ctx context.Context, msg SmsMessage) error {
 // canonicalQueryString 返回按 key 排序、URL-encoded 后用 & 连接的 query string。
 // 同 key 多值按出现顺序保留。
 func canonicalQueryString(values url.Values) string {
-	keys := make([]string, 0, len(values))
-	for k := range values {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
+	keys := slices.Sorted(maps.Keys(values))
 
 	var sb strings.Builder
 	first := true
@@ -194,22 +188,4 @@ func volcSigningKey(secret, date, region, service string) []byte {
 	kRegion := hmacSha256(kDate, []byte(region))
 	kService := hmacSha256(kRegion, []byte(service))
 	return hmacSha256(kService, []byte("request"))
-}
-
-// hexSha256 对 data 求 SHA256 后返回小写 hex。
-func hexSha256(data []byte) string {
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
-}
-
-// hmacSha256 返回 HMAC-SHA256(key, data) 的二进制摘要。
-func hmacSha256(key, data []byte) []byte {
-	h := hmac.New(sha256.New, key)
-	h.Write(data)
-	return h.Sum(nil)
-}
-
-// hexHmacSha256 返回 HMAC-SHA256(key, data) 的小写 hex。
-func hexHmacSha256(key, data []byte) string {
-	return hex.EncodeToString(hmacSha256(key, data))
 }

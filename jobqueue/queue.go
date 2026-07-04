@@ -251,9 +251,8 @@ func (q *Queue) Start(parent context.Context) error {
 	}
 
 	for _, h := range snapshot {
-		for i := 0; i < h.concurrency; i++ {
-			q.wg.Add(1)
-			go q.runWorker(workerCtx, h)
+		for range h.concurrency {
+			q.wg.Go(func() { q.runWorker(workerCtx, h) })
 		}
 	}
 	return nil

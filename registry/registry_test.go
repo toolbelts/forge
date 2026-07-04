@@ -139,10 +139,8 @@ func TestRegister_ConcurrentConflict(t *testing.T) {
 	successes := make(chan *Registration, workers)
 	conflicts := make(chan error, workers)
 	unexpected := make(chan error, workers)
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+	for i := range workers {
+		wg.Go(func() {
 			<-start
 			reg, err := m.Register(context.Background(), Instance{
 				Service: "svc",
@@ -157,7 +155,7 @@ func TestRegister_ConcurrentConflict(t *testing.T) {
 			default:
 				unexpected <- err
 			}
-		}(i)
+		})
 	}
 	close(start)
 	wg.Wait()

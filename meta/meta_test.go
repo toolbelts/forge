@@ -199,6 +199,44 @@ func TestOutgoingContextWithoutExistingMetadata(t *testing.T) {
 	}
 }
 
+func TestNormalizeClientIP(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"1.2.3.4", "1.2.3.4"},
+		{"1.2.3.4:8080", "1.2.3.4"},
+		{"2001:db8::1", "2001:db8::1"},
+		{"[2001:db8::1]", "2001:db8::1"},
+		{"[2001:db8::1]:8080", "2001:db8::1"},
+		// CloudFront-Viewer-Address 的 IPv6 形态：不带括号直接拼端口
+		{"2001:0db8:85a3:8d3:1319:8a2e:370:7348:46532", "2001:db8:85a3:8d3:1319:8a2e:370:7348"},
+		{"2001:db8::1:46532", "2001:db8::1"},
+		{"fe80::1%eth0", "fe80::1"},
+		{" 1.2.3.4 ", "1.2.3.4"},
+		{"", ""},
+		{"not-an-ip", ""},
+		{"[garbage]", ""},
+		{"@", ""}, // unix socket 握手地址
+	}
+	for _, c := range cases {
+		if got := normalizeClientIP(c.in); got != c.want {
+			t.Errorf("normalizeClientIP(%q) = %q; want %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestAnnotatorUserIpFallsBackOnInvalidHeader(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/v1/a", nil)
+	req.Header.Set("X-Real-Ip", "not-an-ip")
+	req.RemoteAddr = "[2001:db8::1]:52642"
+
+	md := Annotator(context.Background(), req)
+	if got := md.Get(MetaUserIp); len(got) != 1 || got[0] != "2001:db8::1" {
+		t.Fatalf("user_ip = %v; want [2001:db8::1]", got)
+	}
+}
+
 func TestAnnotatorKeepsNonBearerAuthorizationBehavior(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "http://example.com/v1/a", nil)
 	req.Header.Set("Authorization", "Basic abc")

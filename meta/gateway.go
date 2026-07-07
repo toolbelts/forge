@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 
 	"google.golang.org/grpc/metadata"
@@ -57,15 +58,18 @@ func Annotator(ctx context.Context, req *http.Request) metadata.MD {
 	token := cmp.Or(strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "), req.Header.Get(MetaToken))
 	set(MetaToken, token)
 
-	// 获取真实用户 IP：优先读取 CDN/Nginx 的代理头，最后回退到握手地址
-	ip := cmp.Or(
+	// 获取真实用户 IP：优先读取 CDN/Nginx 的代理头，最后回退到握手地址。
+	// 逐个校验合法性，某个头存在但值非法时继续回退，避免下游拿到无法解析的值。
+	var ip string
+	for _, candidate := range []string{
 		req.Header.Get("Cf-Connecting-Ip"),
 		req.Header.Get("CloudFront-Viewer-Address"),
 		req.Header.Get("X-Real-Ip"),
 		req.RemoteAddr,
-	)
-	if host, _, err := net.SplitHostPort(ip); err == nil {
-		ip = host
+	} {
+		if ip = normalizeClientIP(candidate); ip != "" {
+			break
+		}
 	}
 	set(MetaUserIp, ip)
 
@@ -74,4 +78,40 @@ func Annotator(ctx context.Context, req *http.Request) metadata.MD {
 	set(MetaUserCountry, strings.ToUpper(country))
 
 	return md
+}
+
+// normalizeClientIP 把代理头或握手地址里的原始值规整为纯 IP 字符串，无法解析时返回空。
+// 兼容以下形态：
+//   - "1.2.3.4" / "1.2.3.4:port"
+//   - "2001:db8::1" / "[2001:db8::1]" / "[2001:db8::1]:port"
+//   - CloudFront-Viewer-Address 的 IPv6 形态 "2001:db8::1:port"（不带括号直接拼端口）
+//   - 带 zone 的链路本地地址 "fe80::1%eth0"（zone 会被剥离）
+func normalizeClientIP(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if addr, err := netip.ParseAddr(s); err == nil {
+		return addr.WithZone("").String()
+	}
+	if host, _, err := net.SplitHostPort(s); err == nil {
+		if addr, err := netip.ParseAddr(host); err == nil {
+			return addr.WithZone("").String()
+		}
+		return ""
+	}
+	// "[::1]"：有括号但没端口，SplitHostPort 会报错，手动去括号
+	if inner := strings.TrimSuffix(strings.TrimPrefix(s, "["), "]"); inner != s {
+		if addr, err := netip.ParseAddr(inner); err == nil {
+			return addr.WithZone("").String()
+		}
+		return ""
+	}
+	// "2001:db8::1:46532"：CloudFront 的 IPv6+端口，按最后一个冒号切开重试
+	if i := strings.LastIndexByte(s, ':'); i > 0 {
+		if addr, err := netip.ParseAddr(s[:i]); err == nil {
+			return addr.WithZone("").String()
+		}
+	}
+	return ""
 }

@@ -66,27 +66,27 @@ func Has(ctx context.Context, key string) bool {
 
 // Raw 返回指定 key 对应的原始值。
 func Raw(ctx context.Context, key string) (any, bool) {
-	return rawValue(current(ctx), key)
+	return current(ctx).rawValue(key)
 }
 
 // String 将指定 key 的值读取为 string；key 缺失或值为 nil 时返回 ""。
 func String(ctx context.Context, key string) string {
-	return stringFrom(current(ctx), key)
+	return current(ctx).stringFrom(key)
 }
 
 // Int64 将指定 key 的值读取为 int64；key 缺失或转换失败时返回 0。
 func Int64(ctx context.Context, key string) int64 {
-	return int64From(current(ctx), key)
+	return current(ctx).int64From(key)
 }
 
 // Float64 将指定 key 的值读取为 float64；key 缺失或转换失败时返回 0。
 func Float64(ctx context.Context, key string) float64 {
-	return float64From(current(ctx), key)
+	return current(ctx).float64From(key)
 }
 
 // Bool 将指定 key 的值读取为 bool；key 缺失或转换失败时返回 false。
 func Bool(ctx context.Context, key string) bool {
-	return boolFrom(current(ctx), key)
+	return current(ctx).boolFrom(key)
 }
 
 // OutgoingContext 将当前元数据合并到 outgoing gRPC metadata。
@@ -119,20 +119,20 @@ func OutgoingContext(ctx context.Context) context.Context {
 func Request(ctx context.Context) RequestMeta {
 	s := current(ctx)
 	return RequestMeta{
-		UserAgent:   stringFrom(s, MetaUserAgent),
-		Method:      stringFrom(s, MetaRequestMethod),
-		Path:        stringFrom(s, MetaRequestPath),
-		Uri:         stringFrom(s, MetaRequestUri),
-		Host:        stringFrom(s, MetaRequestHost),
-		Token:       stringFrom(s, MetaToken),
-		UserId:      int64From(s, MetaUserId),
-		UserType:    int8From(s, MetaUserType),
-		UserIp:      stringFrom(s, MetaUserIp),
-		UserCountry: stringFrom(s, MetaUserCountry),
-		DeviceId:    stringFrom(s, MetaDeviceId),
-		Language:    stringFrom(s, MetaLanguage),
-		Version:     stringFrom(s, MetaVersion),
-		Platform:    stringFrom(s, MetaPlatform),
+		UserAgent:   s.stringFrom(MetaUserAgent),
+		Method:      s.stringFrom(MetaRequestMethod),
+		Path:        s.stringFrom(MetaRequestPath),
+		Uri:         s.stringFrom(MetaRequestUri),
+		Host:        s.stringFrom(MetaRequestHost),
+		Token:       s.stringFrom(MetaToken),
+		UserId:      s.int64From(MetaUserId),
+		UserType:    s.int8From(MetaUserType),
+		UserIp:      s.stringFrom(MetaUserIp),
+		UserCountry: s.stringFrom(MetaUserCountry),
+		DeviceId:    s.stringFrom(MetaDeviceId),
+		Language:    s.stringFrom(MetaLanguage),
+		Version:     s.stringFrom(MetaVersion),
+		Platform:    s.stringFrom(MetaPlatform),
 	}
 }
 
@@ -180,7 +180,7 @@ func newFromIncoming(ctx context.Context) *store {
 	return s
 }
 
-func rawValue(s *store, key string) (any, bool) {
+func (s *store) rawValue(key string) (any, bool) {
 	if s == nil {
 		return nil, false
 	}
@@ -188,16 +188,16 @@ func rawValue(s *store, key string) (any, bool) {
 	return v, ok
 }
 
-func stringFrom(s *store, key string) string {
-	v, ok := rawValue(s, key)
+func (s *store) stringFrom(key string) string {
+	v, ok := s.rawValue(key)
 	if !ok {
 		return ""
 	}
 	return stringValue(v)
 }
 
-func int64From(s *store, key string) int64 {
-	v, ok := rawValue(s, key)
+func (s *store) int64From(key string) int64 {
+	v, ok := s.rawValue(key)
 	if !ok {
 		return 0
 	}
@@ -205,8 +205,8 @@ func int64From(s *store, key string) int64 {
 	return n
 }
 
-func int8From(s *store, key string) int8 {
-	v, ok := rawValue(s, key)
+func (s *store) int8From(key string) int8 {
+	v, ok := s.rawValue(key)
 	if !ok {
 		return 0
 	}
@@ -217,8 +217,8 @@ func int8From(s *store, key string) int8 {
 	return int8(n)
 }
 
-func float64From(s *store, key string) float64 {
-	v, ok := rawValue(s, key)
+func (s *store) float64From(key string) float64 {
+	v, ok := s.rawValue(key)
 	if !ok {
 		return 0
 	}
@@ -226,8 +226,8 @@ func float64From(s *store, key string) float64 {
 	return f
 }
 
-func boolFrom(s *store, key string) bool {
-	v, ok := rawValue(s, key)
+func (s *store) boolFrom(key string) bool {
+	v, ok := s.rawValue(key)
 	if !ok {
 		return false
 	}

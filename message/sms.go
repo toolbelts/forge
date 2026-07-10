@@ -99,10 +99,10 @@ func regionPrefixMatch(digits string, prefixes []string) bool {
 	return false
 }
 
-// inferSmsMode 根据消息字段判断需要哪种 mode。
+// inferMode 根据消息字段判断需要哪种 mode。
 // TemplateId 优先(template 比 raw 信息更明确),其次 Content。
 // 两者都空返回 ok=false。
-func inferSmsMode(msg SmsMessage) (smsMode, bool) {
+func (msg SmsMessage) inferMode() (smsMode, bool) {
 	switch {
 	case msg.TemplateId != "":
 		return smsModeTemplate, true
@@ -113,7 +113,7 @@ func inferSmsMode(msg SmsMessage) (smsMode, bool) {
 	}
 }
 
-// supportsMode 判断 sender 的 Mode 能否覆盖请求的 mode。
-func supportsMode(have, need smsMode) bool {
+// supports 判断 sender 的 Mode 能否覆盖请求的 mode。
+func (have smsMode) supports(need smsMode) bool {
 	return have == need || have == smsModeBoth
 }

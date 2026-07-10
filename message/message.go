@@ -90,7 +90,7 @@ func (m *Manager) SendEmail(ctx context.Context, msg EmailMessage) error {
 		msg.Subject, msg.Html, msg.Text = subject, html, text
 	}
 
-	if err := validateEmailMessage(msg); err != nil {
+	if err := msg.validate(); err != nil {
 		return err
 	}
 
@@ -119,7 +119,7 @@ func (m *Manager) SendEmail(ctx context.Context, msg EmailMessage) error {
 // SendSms 按消息字段判定所需 mode,然后走「单号码 + provider fallback」。
 //
 // 路由规则:
-//   - 按 m.sms 优先级遍历 sender:同时满足 mode 兼容(supportsMode)与区号筛选
+//   - 按 m.sms 优先级遍历 sender:同时满足 mode 兼容(smsMode.supports)与区号筛选
 //     (sender.Accepts)才会被选中,首个发送成功胜出。
 //   - 若所有兼容 sender 都失败 → 包装最后一次失败的错误,错误文本带上 To。
 //
@@ -132,7 +132,7 @@ func (m *Manager) SendSms(ctx context.Context, msg SmsMessage) error {
 	if msg.To == "" {
 		return ErrInvalidSmsMessage
 	}
-	needMode, ok := inferSmsMode(msg)
+	needMode, ok := msg.inferMode()
 	if !ok {
 		return ErrInvalidSmsMessage
 	}
@@ -142,7 +142,7 @@ func (m *Manager) SendSms(ctx context.Context, msg SmsMessage) error {
 		eligible bool
 	)
 	for _, s := range m.sms {
-		if !supportsMode(s.Mode(), needMode) {
+		if !s.Mode().supports(needMode) {
 			continue
 		}
 		if !s.Accepts(msg.To) {

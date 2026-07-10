@@ -89,8 +89,8 @@ func domainSuffixMatch(domain string, suffixes []string) bool {
 	return false
 }
 
-// validateEmailMessage 在 dispatch 之前做最小字段校验,避免每个后端各自重复一次。
-func validateEmailMessage(msg EmailMessage) error {
+// validate 在 dispatch 之前做最小字段校验,避免每个后端各自重复一次。
+func (msg EmailMessage) validate() error {
 	if msg.To == "" {
 		return ErrInvalidEmailMessage
 	}

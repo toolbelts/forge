@@ -30,8 +30,8 @@ func (p *RecoveryProvider) Setup(ctx context.Context) error {
 		hostname: hostname,
 		appName:  string(MustGetAppName(ctx)),
 	}
-	chain.Use(recoveryUnaryInterceptor(deps))
-	chain.UseStream(recoveryStreamInterceptor(deps))
+	chain.Use(deps.unaryInterceptor())
+	chain.UseStream(deps.streamInterceptor())
 	log.Ctx(ctx).Info().Str("provider", "recovery").Msg("recovery interceptor registered")
 	return nil
 }
@@ -43,8 +43,8 @@ type recoveryDeps struct {
 	appName  string
 }
 
-// recoveryUnaryInterceptor 捕获 unary RPC 中的 panic,转 errkit.CodePanic,stack 写日志,并异步推送告警。
-func recoveryUnaryInterceptor(deps recoveryDeps) grpc.UnaryServerInterceptor {
+// unaryInterceptor 捕获 unary RPC 中的 panic,转 errkit.CodePanic,stack 写日志,并异步推送告警。
+func (deps recoveryDeps) unaryInterceptor() grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (resp any, err error) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -54,7 +54,7 @@ func recoveryUnaryInterceptor(deps recoveryDeps) grpc.UnaryServerInterceptor {
 					Interface("panic", r).
 					Bytes("stack", stack).
 					Msg("grpc panic recovered")
-				go notifyPanic(deps, info.FullMethod, r, stack)
+				go deps.notifyPanic(info.FullMethod, r, stack)
 				err = errkit.New(errkit.CodePanic, "internal panic").
 					WithMetadata("panic", fmt.Sprint(r))
 			}
@@ -63,8 +63,8 @@ func recoveryUnaryInterceptor(deps recoveryDeps) grpc.UnaryServerInterceptor {
 	}
 }
 
-// recoveryStreamInterceptor 同 unary 但处理流式 RPC。
-func recoveryStreamInterceptor(deps recoveryDeps) grpc.StreamServerInterceptor {
+// streamInterceptor 同 unary 但处理流式 RPC。
+func (deps recoveryDeps) streamInterceptor() grpc.StreamServerInterceptor {
 	return func(srv any, ss grpc.ServerStream, info *grpc.StreamServerInfo, handler grpc.StreamHandler) (err error) {
 		defer func() {
 			if r := recover(); r != nil {
@@ -74,7 +74,7 @@ func recoveryStreamInterceptor(deps recoveryDeps) grpc.StreamServerInterceptor {
 					Interface("panic", r).
 					Bytes("stack", stack).
 					Msg("grpc stream panic recovered")
-				go notifyPanic(deps, info.FullMethod, r, stack)
+				go deps.notifyPanic(info.FullMethod, r, stack)
 				err = errkit.New(errkit.CodePanic, "internal panic").
 					WithMetadata("panic", fmt.Sprint(r))
 			}
@@ -85,7 +85,7 @@ func recoveryStreamInterceptor(deps recoveryDeps) grpc.StreamServerInterceptor {
 
 // notifyPanic 用独立 background ctx + 超时异步推送 panic 告警，避免阻塞 RPC 返回，
 // 也避免 RPC 自身 ctx 已被 cancel 影响通知发送。
-func notifyPanic(deps recoveryDeps, method string, panicValue any, stack []byte) {
+func (deps recoveryDeps) notifyPanic(method string, panicValue any, stack []byte) {
 	ctx, cancel := context.WithTimeout(context.Background(), notifySendTimeout)
 	defer cancel()
 

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/structpb"
 
@@ -224,5 +225,69 @@ func TestErrorStringNoLeak(t *testing.T) {
 	wrapped := errkit.Wrap(context.Canceled, errkit.CodeCanceled, "y")
 	if got := wrapped.Error(); got == "" {
 		t.Fatal("wrapped Error empty")
+	}
+}
+
+func TestFromGrpcErrorDecodesDetails(t *testing.T) {
+	// 模拟应用注册的 Decoder:从 structpb.Struct detail 恢复业务码 + metadata
+	errkit.RegisterDecoder(func(details []proto.Message) (errkit.Error, bool) {
+		for _, d := range details {
+			s, ok := d.(*structpb.Struct)
+			if !ok {
+				continue
+			}
+			e := errkit.New(errkit.Code(s.Fields["code"].GetNumberValue()), s.Fields["message"].GetStringValue())
+			if v := s.Fields["remaining"].GetStringValue(); v != "" {
+				e = e.WithMetadata("remaining", v)
+			}
+			return e, true
+		}
+		return nil, false
+	})
+	t.Cleanup(func() { errkit.RegisterDecoder(nil) })
+
+	detail, err := structpb.NewStruct(map[string]any{
+		"code": 20010, "message": "user banned", "remaining": "3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := status.New(codes.PermissionDenied, "user banned").WithDetails(detail)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 跨进程场景:client 侧只有 *status.Error,errors.As 不可达,必须走 details 解码
+	e, ok := errkit.FromGrpcError(st.Err())
+	if !ok {
+		t.Fatal("FromGrpcError = false, want decoded error")
+	}
+	if e.Code() != errkit.Code(20010) {
+		t.Errorf("Code = %d, want 20010", e.Code())
+	}
+	if e.Message() != "user banned" {
+		t.Errorf("Message = %q", e.Message())
+	}
+	if e.Metadata()["remaining"] != "3" {
+		t.Errorf("Metadata[remaining] = %q, want 3", e.Metadata()["remaining"])
+	}
+}
+
+func TestFromGrpcErrorPassthroughAndFallback(t *testing.T) {
+	// errors.As 直通:链上已是 errkit.Error 时不需要 Decoder
+	src := errkit.New(errkit.CodeNotFound, "missing")
+	if e, ok := errkit.FromGrpcError(src); !ok || e.Code() != errkit.CodeNotFound {
+		t.Fatalf("passthrough failed: ok=%v", ok)
+	}
+
+	// 未注册 Decoder:status error 无法恢复,返回 false 由调用方兜底
+	st := status.New(codes.PermissionDenied, "denied")
+	if _, ok := errkit.FromGrpcError(st.Err()); ok {
+		t.Fatal("FromGrpcError = true without decoder, want false")
+	}
+
+	// nil error
+	if _, ok := errkit.FromGrpcError(nil); ok {
+		t.Fatal("FromGrpcError(nil) = true, want false")
 	}
 }

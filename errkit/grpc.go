@@ -5,6 +5,7 @@ import (
 	"sync/atomic"
 
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -129,4 +130,53 @@ func Encode(e Error) []proto.Message {
 		return (*enc)(e)
 	}
 	return nil
+}
+
+// Decoder 应用层把 gRPC Status.details 还原成 errkit.Error 的钩子,与 Encoder 对称。
+//
+// forge 自身不依赖任何 proto;decoder 由应用启动时通过 RegisterDecoder 注入,
+// 在 details 里识别出应用错误 proto 时返回 (Error, true),否则返回 (nil, false)。
+type Decoder func(details []proto.Message) (Error, bool)
+
+var decoder atomic.Pointer[Decoder]
+
+// RegisterDecoder 注册或替换 Decoder。nil 表示清空。
+func RegisterDecoder(dec Decoder) {
+	if dec == nil {
+		decoder.Store(nil)
+		return
+	}
+	decoder.Store(&dec)
+}
+
+// FromGrpcError 从 gRPC 客户端错误恢复 errkit.Error:
+// 先 errors.As(同进程/已包装场景),再解 status details(跨进程场景,需应用 RegisterDecoder)。
+// 都失败返回 (nil, false),由调用方决定兜底策略。
+//
+// grpc-gateway 与服务间调用的 client 侧统一走本函数,业务码与 metadata 得以跨进程保留;
+// 未注册 Decoder 时行为与 FromError 一致,存量应用不受影响。
+func FromGrpcError(err error) (Error, bool) {
+	if e, ok := FromError(err); ok {
+		return e, true
+	}
+	dec := decoder.Load()
+	if dec == nil || err == nil {
+		return nil, false
+	}
+	st, ok := status.FromError(err)
+	if !ok {
+		return nil, false
+	}
+	rawDetails := st.Details()
+	details := make([]proto.Message, 0, len(rawDetails))
+	for _, d := range rawDetails {
+		// grpc-go Details() 已按全局 proto registry 反序列化,失败项是 error 值,跳过。
+		if m, ok := d.(proto.Message); ok {
+			details = append(details, m)
+		}
+	}
+	if len(details) == 0 {
+		return nil, false
+	}
+	return (*dec)(details)
 }

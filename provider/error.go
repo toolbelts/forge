@@ -125,12 +125,13 @@ func toGrpcStatus(e errkit.Error) error {
 
 // GatewayErrorHandler 替换 grpc-gateway 默认错误处理器。
 //
-// 链路:err → errkit.FromError → 决定 HTTP status → 用 errkit.Encode 拿 proto details
-// 序列化为 JSON。无 Encoder 时回退到 {code,message,metadata} 通用格式。
+// 链路:err → errkit.FromGrpcError(errors.As + status details 解码,需应用 RegisterDecoder)
+// → 决定 HTTP status → 用 errkit.Encode 拿 proto details 序列化为 JSON。
+// 无 Encoder 时回退到 {code,message,metadata} 通用格式。
 func GatewayErrorHandler(ctx context.Context, mux *runtime.ServeMux, marshaler runtime.Marshaler, w http.ResponseWriter, r *http.Request, err error) {
-	e, ok := errkit.FromError(err)
+	e, ok := errkit.FromGrpcError(err)
 	if !ok {
-		// 极端兜底:理论上 ErrorProvider 已挡住,但若有路径绕过就用 grpc status 兜底
+		// 极端兜底:未注册 Decoder 或 details 缺失时按 grpc code 反推内置码,业务码无法恢复
 		st, _ := status.FromError(err)
 		log.Ctx(ctx).Warn().
 			Str("path", r.URL.Path).

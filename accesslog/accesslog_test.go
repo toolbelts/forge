@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,8 @@ import (
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	"github.com/toolbelts/forge/errkit"
 	"github.com/toolbelts/forge/meta"
@@ -161,6 +164,9 @@ func TestUnaryInterceptor_BizError(t *testing.T) {
 	if _, has := e["resp"]; has {
 		t.Errorf("unexpected resp on error path")
 	}
+	if _, has := e["resp_text"]; has {
+		t.Errorf("unexpected resp_text on error path")
+	}
 }
 
 // TestUnaryInterceptor_Slow 验证 spent > slow_threshold 且无错误时降级为 Warn。
@@ -204,7 +210,7 @@ func TestUnaryInterceptor_ErrorBeatsSlow(t *testing.T) {
 	}
 }
 
-// TestUnaryInterceptor_PayloadDisabled 验证 payload=off 时 req/resp 字段都不写。
+// TestUnaryInterceptor_PayloadDisabled 验证 payload=off 时 req/resp 与 *_text 字段都不写。
 func TestUnaryInterceptor_PayloadDisabled(t *testing.T) {
 	c, ctx := newCapture(t)
 	interceptor := UnaryInterceptor(WithPayload(false, 0))
@@ -213,15 +219,15 @@ func TestUnaryInterceptor_PayloadDisabled(t *testing.T) {
 	_, _ = interceptor(ctx, "req", info, handler)
 
 	e := c.only(t)
-	if _, has := e["req"]; has {
-		t.Errorf("unexpected req field with payload=off")
-	}
-	if _, has := e["resp"]; has {
-		t.Errorf("unexpected resp field with payload=off")
+	for _, k := range []string{"req", "req_text", "resp", "resp_text"} {
+		if _, has := e[k]; has {
+			t.Errorf("unexpected %s field with payload=off", k)
+		}
 	}
 }
 
-// TestUnaryInterceptor_PayloadEnabled 验证 payload=on 时 req/resp 字段写入(非 proto fallback 到 fmt.Sprint)。
+// TestUnaryInterceptor_PayloadEnabled 验证 payload=on 时非 proto 值 fallback 到 fmt.Sprint,
+// 落 *_text 字符串字段,req/resp 对象字段缺席。
 func TestUnaryInterceptor_PayloadEnabled(t *testing.T) {
 	c, ctx := newCapture(t)
 	interceptor := UnaryInterceptor(WithPayload(true, 0))
@@ -230,11 +236,17 @@ func TestUnaryInterceptor_PayloadEnabled(t *testing.T) {
 	_, _ = interceptor(ctx, "req-data", info, handler)
 
 	e := c.only(t)
-	if e["req"] != "req-data" {
-		t.Errorf("req = %v, want req-data", e["req"])
+	if e["req_text"] != "req-data" {
+		t.Errorf("req_text = %v, want req-data", e["req_text"])
 	}
-	if e["resp"] != "ok" {
-		t.Errorf("resp = %v, want ok", e["resp"])
+	if e["resp_text"] != "ok" {
+		t.Errorf("resp_text = %v, want ok", e["resp_text"])
+	}
+	if _, has := e["req"]; has {
+		t.Errorf("unexpected req object field for non-proto payload")
+	}
+	if _, has := e["resp"]; has {
+		t.Errorf("unexpected resp object field for non-proto payload")
 	}
 }
 
@@ -248,15 +260,19 @@ func TestUnaryInterceptor_PayloadOmitsRespOnError(t *testing.T) {
 	_, _ = interceptor(ctx, "req-data", info, handler)
 
 	e := c.only(t)
-	if e["req"] != "req-data" {
-		t.Errorf("req = %v, want req-data", e["req"])
+	if e["req_text"] != "req-data" {
+		t.Errorf("req_text = %v, want req-data", e["req_text"])
 	}
 	if _, has := e["resp"]; has {
 		t.Errorf("unexpected resp on error path")
 	}
+	if _, has := e["resp_text"]; has {
+		t.Errorf("unexpected resp_text on error path")
+	}
 }
 
-// TestUnaryInterceptor_PayloadTruncate 验证字节级截断,head <= maxBytes 且尾部追加 truncatedSuffix。
+// TestUnaryInterceptor_PayloadTruncate 验证字节级截断,head <= maxBytes 且尾部追加 truncatedSuffix,
+// 截断值落 req_text 字符串字段。
 func TestUnaryInterceptor_PayloadTruncate(t *testing.T) {
 	c, ctx := newCapture(t)
 	interceptor := UnaryInterceptor(WithPayload(true, 8))
@@ -266,9 +282,9 @@ func TestUnaryInterceptor_PayloadTruncate(t *testing.T) {
 	_, _ = interceptor(ctx, longReq, info, handler)
 
 	e := c.only(t)
-	req, _ := e["req"].(string)
+	req, _ := e["req_text"].(string)
 	if !strings.HasSuffix(req, truncatedSuffix) {
-		t.Errorf("req=%q, want suffix %q", req, truncatedSuffix)
+		t.Errorf("req_text=%q, want suffix %q", req, truncatedSuffix)
 	}
 	head := strings.TrimSuffix(req, truncatedSuffix)
 	if len(head) > 8 {
@@ -276,7 +292,9 @@ func TestUnaryInterceptor_PayloadTruncate(t *testing.T) {
 	}
 }
 
-// TestUnaryInterceptor_PayloadProtoMessage 验证 proto.Message 走 protojson 序列化(字段名遵循 UseProtoNames)。
+// TestUnaryInterceptor_PayloadProtoMessage 验证 proto.Message 走 protojson 序列化(字段名遵循
+// UseProtoNames),以 RawJSON 嵌套对象形态写入 req/resp。protojson 输出含 detrand 随机空格,
+// 断言必须解析回对象比较,不做字符串匹配。
 func TestUnaryInterceptor_PayloadProtoMessage(t *testing.T) {
 	c, ctx := newCapture(t)
 	interceptor := UnaryInterceptor(WithPayload(true, 0))
@@ -286,9 +304,23 @@ func TestUnaryInterceptor_PayloadProtoMessage(t *testing.T) {
 	_, _ = interceptor(ctx, req, info, handler)
 
 	e := c.only(t)
-	reqStr, _ := e["req"].(string)
-	if !strings.Contains(reqStr, `"code":42`) || !strings.Contains(reqStr, `"message":"hi"`) {
-		t.Errorf("req payload not protojson: %q", reqStr)
+	for _, key := range []string{"req", "resp"} {
+		m, ok := e[key].(map[string]any)
+		if !ok {
+			t.Fatalf("%s = %T(%v), want JSON object", key, e[key], e[key])
+		}
+		if m["code"] != float64(42) {
+			t.Errorf("%s.code = %v, want 42", key, m["code"])
+		}
+		if m["message"] != "hi" {
+			t.Errorf("%s.message = %v, want hi", key, m["message"])
+		}
+	}
+	if _, has := e["req_text"]; has {
+		t.Errorf("unexpected req_text alongside req object")
+	}
+	if _, has := e["resp_text"]; has {
+		t.Errorf("unexpected resp_text alongside resp object")
 	}
 }
 
@@ -469,6 +501,9 @@ func TestStreamInterceptor_Success(t *testing.T) {
 	}
 	if _, has := e["req"]; has {
 		t.Errorf("unexpected req in stream log")
+	}
+	if _, has := e["req_text"]; has {
+		t.Errorf("unexpected req_text in stream log")
 	}
 	if _, has := e["http_method"]; has {
 		t.Errorf("unexpected http_method in stream log")
@@ -671,16 +706,20 @@ func TestUnaryInterceptor_MaskFields(t *testing.T) {
 	handler := func(ctx context.Context, _ any) (any, error) { return req, nil }
 	_, _ = interceptor(ctx, req, info, handler)
 
+	// 泄漏检查对整行日志做,比只查 req 字段更强(mask 失效的任何形态都会被抓到)。
+	if strings.Contains(c.buf.String(), "secret-payload") {
+		t.Errorf("log line leaked masked value: %s", c.buf.String())
+	}
 	e := c.only(t)
-	reqStr, _ := e["req"].(string)
-	if strings.Contains(reqStr, "secret-payload") {
-		t.Errorf("req leaked masked value: %q", reqStr)
+	m, ok := e["req"].(map[string]any)
+	if !ok {
+		t.Fatalf("req = %T(%v), want JSON object", e["req"], e["req"])
 	}
-	if !strings.Contains(reqStr, `"message":"***"`) {
-		t.Errorf("req missing masked placeholder: %q", reqStr)
+	if m["message"] != maskPlaceholder {
+		t.Errorf("req.message = %v, want %q", m["message"], maskPlaceholder)
 	}
-	if !strings.Contains(reqStr, `"code":42`) {
-		t.Errorf("req lost non-masked field code: %q", reqStr)
+	if m["code"] != float64(42) {
+		t.Errorf("req lost non-masked field code: %v", m["code"])
 	}
 }
 
@@ -694,8 +733,291 @@ func TestUnaryInterceptor_MaskFields_EmptyNoOp(t *testing.T) {
 	_, _ = interceptor(ctx, req, info, handler)
 
 	e := c.only(t)
-	reqStr, _ := e["req"].(string)
-	if !strings.Contains(reqStr, `"message":"hi"`) {
-		t.Errorf("empty mask should leave value intact: %q", reqStr)
+	m, ok := e["req"].(map[string]any)
+	if !ok {
+		t.Fatalf("req = %T(%v), want JSON object", e["req"], e["req"])
+	}
+	if m["message"] != "hi" {
+		t.Errorf("empty mask should leave value intact: %v", m["message"])
+	}
+}
+
+// TestMarshalPayload 单元覆盖判别式决策流的各分支归属:omit / text / json。
+func TestMarshalPayload(t *testing.T) {
+	tooLarge := &statuspb.Status{Message: strings.Repeat("x", 10000)}
+	cases := []struct {
+		name     string
+		v        any
+		opts     []Option
+		wantKind payloadKind
+		check    func(t *testing.T, pv payloadValue)
+	}{
+		{
+			name:     "nil_omit",
+			v:        nil,
+			wantKind: payloadOmit,
+		},
+		{
+			name:     "non_proto_text",
+			v:        "hello",
+			wantKind: payloadText,
+			check: func(t *testing.T, pv payloadValue) {
+				if pv.text != "hello" {
+					t.Errorf("text = %q, want hello", pv.text)
+				}
+			},
+		},
+		{
+			name:     "small_proto_json_object",
+			v:        &statuspb.Status{Code: 42, Message: "hi"},
+			wantKind: payloadJson,
+			check: func(t *testing.T, pv payloadValue) {
+				var m map[string]any
+				if err := json.Unmarshal(pv.raw, &m); err != nil {
+					t.Fatalf("raw not valid JSON: %v (raw=%s)", err, pv.raw)
+				}
+				if m["code"] != float64(42) || m["message"] != "hi" {
+					t.Errorf("raw = %s, want code=42 message=hi", pv.raw)
+				}
+			},
+		},
+		{
+			// proto3 string 字段必须是合法 UTF-8,protojson 对脏字节直接报错,走占位符分支。
+			name:     "invalid_utf8_marshal_error",
+			v:        &statuspb.Status{Message: string([]byte{0xff, 0xfe})},
+			wantKind: payloadText,
+			check: func(t *testing.T, pv payloadValue) {
+				if !strings.HasPrefix(pv.text, "<marshal error") {
+					t.Errorf("text = %q, want <marshal error prefix", pv.text)
+				}
+			},
+		},
+		{
+			name:     "too_large_placeholder",
+			v:        tooLarge,
+			wantKind: payloadText,
+			check: func(t *testing.T, pv payloadValue) {
+				want := fmt.Sprintf(tooLargeFmt, tooLarge.ProtoReflect().Descriptor().FullName(), proto.Size(tooLarge))
+				if pv.text != want {
+					t.Errorf("text = %q, want %q", pv.text, want)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := buildOptions(tc.opts...)
+			pv := marshalPayload(tc.v, &o)
+			if pv.kind != tc.wantKind {
+				t.Fatalf("kind = %d, want %d (pv=%+v)", pv.kind, tc.wantKind, pv)
+			}
+			if tc.check != nil {
+				tc.check(t, pv)
+			}
+		})
+	}
+}
+
+// TestMarshalPayload_WrapperNonObject wrapper 类型顶层输出是 JSON 标量而非对象,
+// 必须落 text 分支,维持 req/resp 字段"恒为对象"的形态不变量。
+func TestMarshalPayload_WrapperNonObject(t *testing.T) {
+	o := buildOptions()
+	pv := marshalPayload(wrapperspb.String("hi"), &o)
+	if pv.kind != payloadText {
+		t.Fatalf("kind = %d, want payloadText (pv=%+v)", pv.kind, pv)
+	}
+	if pv.text != `"hi"` {
+		t.Errorf("text = %q, want %q", pv.text, `"hi"`)
+	}
+}
+
+// TestUnaryInterceptor_PayloadTooLarge 超过 wire size 预检阈值(自动派生 4×maxBytes)的消息
+// 跳过序列化,req_text 记占位符,req 对象字段缺席。
+func TestUnaryInterceptor_PayloadTooLarge(t *testing.T) {
+	c, ctx := newCapture(t)
+	interceptor := UnaryInterceptor(WithPayload(true, 8)) // 阈值 = 4×8 = 32
+	info := &grpc.UnaryServerInfo{FullMethod: "/svc.Foo/Bar"}
+	req := &statuspb.Status{Message: strings.Repeat("a", 100)}
+	handler := func(ctx context.Context, _ any) (any, error) { return "ok", nil }
+	_, _ = interceptor(ctx, req, info, handler)
+
+	e := c.only(t)
+	reqText, _ := e["req_text"].(string)
+	if !strings.HasPrefix(reqText, "<payload too large: ") {
+		t.Errorf("req_text = %q, want too-large placeholder", reqText)
+	}
+	if !strings.Contains(reqText, "google.rpc.Status") {
+		t.Errorf("req_text = %q, want message full name", reqText)
+	}
+	if _, has := e["req"]; has {
+		t.Errorf("unexpected req object field for too-large payload")
+	}
+}
+
+// TestUnaryInterceptor_ProtoTruncateGoesText 预检通过但 JSON 输出超 maxBytes 的消息,
+// 截断前缀落 req_text(截断后的 JSON 片段非法,不能 RawJSON 嵌入)。
+func TestUnaryInterceptor_ProtoTruncateGoesText(t *testing.T) {
+	c, ctx := newCapture(t)
+	interceptor := UnaryInterceptor(WithPayload(true, 32)) // 阈值 = 128
+	info := &grpc.UnaryServerInfo{FullMethod: "/svc.Foo/Bar"}
+	req := &statuspb.Status{Code: 42, Message: strings.Repeat("m", 60)} // wire ≈ 66 过预检,JSON ≈ 85 > 32
+	handler := func(ctx context.Context, _ any) (any, error) { return "ok", nil }
+	_, _ = interceptor(ctx, req, info, handler)
+
+	e := c.only(t)
+	reqText, _ := e["req_text"].(string)
+	if !strings.HasSuffix(reqText, truncatedSuffix) {
+		t.Errorf("req_text = %q, want suffix %q", reqText, truncatedSuffix)
+	}
+	if strings.HasPrefix(reqText, "<payload too large") {
+		t.Errorf("req_text = %q, should not hit size precheck", reqText)
+	}
+	if _, has := e["req"]; has {
+		t.Errorf("unexpected req object field for truncated payload")
+	}
+}
+
+// TestUnaryInterceptor_PayloadNoTruncateNegativeMax maxBytes < 0(要完整 payload)时
+// 自动模式下预检与截断都关闭,大消息以完整对象写入 req。
+func TestUnaryInterceptor_PayloadNoTruncateNegativeMax(t *testing.T) {
+	c, ctx := newCapture(t)
+	interceptor := UnaryInterceptor(WithPayload(true, -1))
+	info := &grpc.UnaryServerInfo{FullMethod: "/svc.Foo/Bar"}
+	msg := strings.Repeat("z", 5000)
+	req := &statuspb.Status{Message: msg}
+	handler := func(ctx context.Context, _ any) (any, error) { return "ok", nil }
+	_, _ = interceptor(ctx, req, info, handler)
+
+	e := c.only(t)
+	m, ok := e["req"].(map[string]any)
+	if !ok {
+		t.Fatalf("req = %T, want JSON object", e["req"])
+	}
+	if m["message"] != msg {
+		t.Errorf("req.message length = %d, want %d (payload should be complete)", len(m["message"].(string)), len(msg))
+	}
+}
+
+// TestWithPayloadSizeLimit_Explicit 显式 payload_size_limit 与自动派生的解耦:
+// 正值在 maxBytes<0 下仍生效("不截断但设防"),负值强制禁用预检。
+func TestWithPayloadSizeLimit_Explicit(t *testing.T) {
+	t.Run("limit_with_unbounded_max_bytes", func(t *testing.T) {
+		c, ctx := newCapture(t)
+		interceptor := UnaryInterceptor(WithPayload(true, -1), WithPayloadSizeLimit(64))
+		info := &grpc.UnaryServerInfo{FullMethod: "/svc.Foo/Bar"}
+		req := &statuspb.Status{Message: strings.Repeat("a", 100)}
+		handler := func(ctx context.Context, _ any) (any, error) { return "ok", nil }
+		_, _ = interceptor(ctx, req, info, handler)
+
+		e := c.only(t)
+		reqText, _ := e["req_text"].(string)
+		if !strings.HasPrefix(reqText, "<payload too large: ") {
+			t.Errorf("req_text = %q, want too-large placeholder", reqText)
+		}
+	})
+	t.Run("disable_precheck", func(t *testing.T) {
+		c, ctx := newCapture(t)
+		interceptor := UnaryInterceptor(WithPayload(true, 0), WithPayloadSizeLimit(-1))
+		info := &grpc.UnaryServerInfo{FullMethod: "/svc.Foo/Bar"}
+		req := &statuspb.Status{Message: strings.Repeat("a", 10000)}
+		handler := func(ctx context.Context, _ any) (any, error) { return "ok", nil }
+		_, _ = interceptor(ctx, req, info, handler)
+
+		e := c.only(t)
+		reqText, _ := e["req_text"].(string)
+		if !strings.HasSuffix(reqText, truncatedSuffix) {
+			t.Errorf("req_text = %q, want truncated payload (precheck disabled)", reqText)
+		}
+		if strings.HasPrefix(reqText, "<payload too large") {
+			t.Errorf("req_text = %q, precheck should be disabled", reqText)
+		}
+	})
+}
+
+// TestOptionsResolveSizeLimit 覆盖 sizeLimit 的派生规则与 Option 顺序无关性。
+func TestOptionsResolveSizeLimit(t *testing.T) {
+	cases := []struct {
+		name string
+		opts []Option
+		want int
+	}{
+		{"default_auto", nil, 4 * 2048},
+		{"explicit_max_bytes_auto", []Option{WithPayload(true, 100)}, 400},
+		{"explicit_limit", []Option{WithPayloadSizeLimit(100)}, 100},
+		{"disable_limit", []Option{WithPayloadSizeLimit(-1)}, 0},
+		{"unbounded_max_bytes_auto_off", []Option{WithPayload(true, -1)}, 0},
+		{"unbounded_max_bytes_explicit_limit", []Option{WithPayload(true, -1), WithPayloadSizeLimit(64)}, 64},
+		{"order_independent", []Option{WithPayloadSizeLimit(64), WithPayload(true, -1)}, 64},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			o := buildOptions(tc.opts...)
+			if o.sizeLimit != tc.want {
+				t.Errorf("sizeLimit = %d, want %d", o.sizeLimit, tc.want)
+			}
+		})
+	}
+}
+
+// TestMaskProbeHit 覆盖 probe 预检:命中、未命中,以及"值整体恰等于 key"的可接受误报
+// (代价仅是白做一次 applyMask 往返,无正确性影响)。
+func TestMaskProbeHit(t *testing.T) {
+	probes := [][]byte{[]byte(`"password"`)}
+	cases := []struct {
+		name string
+		buf  string
+		want bool
+	}{
+		{"key_hit", `{"password":"x"}`, true},
+		{"miss", `{"email":"a@b.c"}`, false},
+		{"value_equals_key_false_positive", `{"type":"password"}`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := maskProbeHit([]byte(tc.buf), probes); got != tc.want {
+				t.Errorf("maskProbeHit(%q) = %v, want %v", tc.buf, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestUnaryInterceptor_MaskMissUnchanged mask 配置了但 payload 不含命中字段时,
+// 短路路径必须产出与无 mask 完全一致的对象(证明 probe 预检不改变行为)。
+func TestUnaryInterceptor_MaskMissUnchanged(t *testing.T) {
+	c, ctx := newCapture(t)
+	interceptor := UnaryInterceptor(WithPayload(true, 0), WithMaskFields([]string{"password"}))
+	info := &grpc.UnaryServerInfo{FullMethod: "/svc.Foo/Bar"}
+	req := &statuspb.Status{Code: 7, Message: "plain"}
+	handler := func(ctx context.Context, _ any) (any, error) { return req, nil }
+	_, _ = interceptor(ctx, req, info, handler)
+
+	e := c.only(t)
+	m, ok := e["req"].(map[string]any)
+	if !ok {
+		t.Fatalf("req = %T, want JSON object", e["req"])
+	}
+	if m["code"] != float64(7) || m["message"] != "plain" {
+		t.Errorf("req = %v, want untouched {code:7, message:plain}", m)
+	}
+}
+
+// TestUnaryInterceptor_PayloadSpecialChars RawJSON 直插的合法性专项:引号/换行/制表符/中文
+// 经 protojson 转义后整行日志仍可解析,且值精确回环。
+func TestUnaryInterceptor_PayloadSpecialChars(t *testing.T) {
+	c, ctx := newCapture(t)
+	interceptor := UnaryInterceptor(WithPayload(true, 0))
+	info := &grpc.UnaryServerInfo{FullMethod: "/svc.Foo/Bar"}
+	msg := "带\"引号\"\n换行\t制表和中文"
+	req := &statuspb.Status{Message: msg}
+	handler := func(ctx context.Context, _ any) (any, error) { return req, nil }
+	_, _ = interceptor(ctx, req, info, handler)
+
+	e := c.only(t) // c.only 内部对整行 json.Unmarshal,即 RawJSON 合法性校验
+	m, ok := e["req"].(map[string]any)
+	if !ok {
+		t.Fatalf("req = %T, want JSON object", e["req"])
+	}
+	if m["message"] != msg {
+		t.Errorf("req.message = %q, want %q (round-trip)", m["message"], msg)
 	}
 }

@@ -42,12 +42,14 @@ func (p *AccessLogProvider) Setup(ctx context.Context) error {
 
 	payload := v.GetBool("accesslog.payload")
 	payloadMaxBytes := v.GetInt("accesslog.payload_max_bytes")
+	payloadSizeLimit := v.GetInt("accesslog.payload_size_limit")
 	slowThreshold := v.GetDuration("accesslog.slow_threshold")
 	skips := v.GetStringSlice("accesslog.skips")
 	maskFields := v.GetStringSlice("accesslog.mask_fields")
 
 	opts := []accesslog.Option{
 		accesslog.WithPayload(payload, payloadMaxBytes),
+		accesslog.WithPayloadSizeLimit(payloadSizeLimit),
 		accesslog.WithSlowThreshold(slowThreshold),
 		accesslog.WithSkips(skips),
 		accesslog.WithMaskFields(maskFields),
@@ -61,6 +63,7 @@ func (p *AccessLogProvider) Setup(ctx context.Context) error {
 		Str("provider", "accesslog").
 		Bool("payload", payload).
 		Int("payload_max_bytes", payloadMaxBytes).
+		Int("payload_size_limit", payloadSizeLimit).
 		Dur("slow_threshold", slowThreshold).
 		Int("skips", len(skips)).
 		Int("mask_fields", len(maskFields)).

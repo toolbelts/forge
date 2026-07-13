@@ -402,11 +402,14 @@ jobqueue:
 | 键 | 类型 | 默认值 | 说明 |
 |---|---|---|---|
 | `enabled` | bool | `false` | |
-| `payload` | bool | `false` | 是否记录请求 / 响应摘要 |
-| `payload_max_bytes` | int | `accesslog` 包默认 | payload 截断阈值 |
+| `payload` | bool | `false` | 是否记录请求 / 响应摘要。proto 消息以 JSON 对象直接嵌入 `req` / `resp` 字段(零二次转义);截断前缀 / 占位符 / 非 proto 值落 `req_text` / `resp_text` 字符串字段,同一条日志两组字段互斥出现 |
+| `payload_max_bytes` | int | `accesslog` 包默认(2048) | payload 单字段截断阈值,`< 0` 不截断 |
+| `payload_size_limit` | int | `0`(自动) | proto wire size 预检阈值:序列化前 `proto.Size` 超过此值直接跳过 protojson,`*_text` 记 `<payload too large: <消息全名>, N bytes>` 占位符,大消息不再白付全量序列化成本。`0` 自动派生为 `4 × payload_max_bytes`(`payload_max_bytes < 0` 时不预检),`< 0` 强制禁用预检 |
 | `slow_threshold` | duration | `accesslog` 包默认 | 超过此值标记 slow 字段 |
 | `skips` | []string | — | path / FullMethod 白名单 |
 | `mask_fields` | []string | — | protojson 摘要中精确匹配 key 名替换为 `"***"`,典型如 `password` / `old_password` / `*_token` |
+
+> **下游索引提示**:`req` / `resp` 是结构随各 RPC 变化的嵌套对象,Elasticsearch 类动态映射会随 proto 字段数膨胀,建议索引模板对这两个字段用 `flattened` 或 `enabled: false`;`req_text` / `resp_text` 恒为字符串,可正常索引。
 
 ### ValidateProvider / RecoveryProvider / ErrorProvider
 
@@ -643,6 +646,8 @@ ratelimit:
 accesslog:
   enabled: true
   payload: false
+  # payload_max_bytes: 2048              # 单字段截断阈值,<0 不截断
+  # payload_size_limit: 0                # 大消息预检阈值,0 = 自动(4×payload_max_bytes)
   slow_threshold: 1s
 
 notify:

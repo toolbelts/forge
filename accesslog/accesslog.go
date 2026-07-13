@@ -1,8 +1,10 @@
 package accesslog
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -21,6 +23,10 @@ import (
 // truncatedSuffix 在 payload 摘要被字节级截断后追加,提示日志查看者尾部已被裁剪。
 const truncatedSuffix = "...[truncated]"
 
+// tooLargeFmt 是 wire size 预检超限时的占位符,%s 为 proto 消息全名、%d 为 wire 字节数。
+// 带类型名让排障时无需还原 payload 就能定位是哪个消息撑大了响应。
+const tooLargeFmt = "<payload too large: %s, %d bytes>"
+
 // maskPlaceholder 命中 mask 字段后的替换值。固定 "***",不开放配置避免无意义的样式分歧。
 const maskPlaceholder = "***"
 
@@ -33,12 +39,16 @@ var payloadMarshaler = protojson.MarshalOptions{
 }
 
 // options 控制 AccessLog 拦截器的行为。
+// sizeLimit / maskProbes 是 resolve() 从原始配置派生的运行时值,不直接接受 Option 写入。
 type options struct {
-	payload         bool
-	payloadMaxBytes int
-	slowThreshold   time.Duration
-	skips           map[string]struct{}
-	maskFields      map[string]struct{}
+	payload          bool
+	payloadMaxBytes  int
+	payloadSizeLimit int // 原始配置:0 自动派生 / <0 禁用预检 / >0 显式 wire 字节阈值
+	sizeLimit        int // resolve() 派生:>0 为预检阈值,<=0 关闭预检
+	slowThreshold    time.Duration
+	skips            map[string]struct{}
+	maskFields       map[string]struct{}
+	maskProbes       [][]byte // resolve() 派生:每个 mask key 的 `"key"` 字节串,序列化后快速预检用
 }
 
 // defaultOptions 给出未显式配置时的默认参数。
@@ -54,12 +64,24 @@ type Option func(*options)
 
 // WithPayload 控制是否记录 req/resp 摘要,以及单字段的字节级长度上限。
 // maxBytes 传 0 时保留默认值,< 0 表示不截断。
+// 完整 JSON 对象写入 req/resp 字段;超长截断后的前缀落 req_text/resp_text 字符串字段。
 func WithPayload(enabled bool, maxBytes int) Option {
 	return func(o *options) {
 		o.payload = enabled
 		if maxBytes != 0 {
 			o.payloadMaxBytes = maxBytes
 		}
+	}
+}
+
+// WithPayloadSizeLimit 设置 proto 消息序列化前的 wire size 预检阈值(字节)。
+// 超过阈值直接跳过 protojson,req_text/resp_text 记 "<payload too large: <消息全名>, N bytes>"
+// 占位符,避免大消息白付全量序列化成本(最终反正会被截断到 payloadMaxBytes)。
+// n > 0 显式阈值;n == 0(默认)自动派生为 4×payloadMaxBytes(payloadMaxBytes < 0 时不预检);
+// n < 0 强制禁用预检。仅作用于 proto.Message 分支。
+func WithPayloadSizeLimit(n int) Option {
+	return func(o *options) {
+		o.payloadSizeLimit = n
 	}
 }
 
@@ -104,13 +126,35 @@ func WithMaskFields(fields []string) Option {
 	}
 }
 
-// buildOptions 把 Option 列表合并到默认配置之上。
+// buildOptions 把 Option 列表合并到默认配置之上,收尾统一做派生,保证 Option 传入顺序无关。
 func buildOptions(opts ...Option) options {
 	o := defaultOptions
 	for _, opt := range opts {
 		opt(&o)
 	}
+	o.resolve()
 	return o
+}
+
+// resolve 从原始配置派生运行时值,必须在所有 Option 应用完之后调用。
+// sizeLimit 自动模式取 4×payloadMaxBytes:JSON 输出相对 wire 格式有膨胀(字段名、引号、
+// base64),4 倍余量保证"能完整放进日志的消息"不会被预检误杀;payloadMaxBytes < 0
+// 表示调用方要完整 payload,自动模式下预检一并禁用。
+func (o *options) resolve() {
+	switch {
+	case o.payloadSizeLimit > 0:
+		o.sizeLimit = o.payloadSizeLimit
+	case o.payloadSizeLimit < 0:
+		o.sizeLimit = 0
+	default:
+		// payloadMaxBytes > MaxInt/4 是退化配置,乘法会溢出,按禁用预检处理。
+		if o.payloadMaxBytes > 0 && o.payloadMaxBytes <= math.MaxInt/4 {
+			o.sizeLimit = 4 * o.payloadMaxBytes
+		}
+	}
+	for k := range o.maskFields {
+		o.maskProbes = append(o.maskProbes, []byte(`"`+k+`"`))
+	}
 }
 
 // UnaryInterceptor 一元 RPC 访问日志拦截器。
@@ -118,7 +162,8 @@ func buildOptions(opts ...Option) options {
 // 必填字段:service、method、full_method、http_method、http_path、user_ip、user_country、
 // device_id、platform、version、language、spent。
 // 条件字段:user_id(meta 有则加)、trace_id/span_id(span 有效则加)、
-// req(payload 启用)、resp(payload 启用且 err==nil)、error_code/error_name(BizError 可提取)。
+// req/req_text(payload 启用,互斥:完整 JSON 对象走 req,截断/占位/非 proto 走 req_text)、
+// resp/resp_text(payload 启用且 err==nil,互斥规则同上)、error_code/error_name(BizError 可提取)。
 // 级别:err != nil → Error;spent > slowThreshold > 0 → Warn;否则 Info。
 func UnaryInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 	o := buildOptions(opts...)
@@ -148,9 +193,9 @@ func UnaryInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 			Str("language", rm.Language)
 		addConditionalFields(evt, ctx)
 		if o.payload {
-			evt.Str("req", marshalPayload(req, o.payloadMaxBytes, o.maskFields))
+			addPayload(evt, "req", "req_text", marshalPayload(req, &o))
 			if err == nil {
-				evt.Str("resp", marshalPayload(resp, o.payloadMaxBytes, o.maskFields))
+				addPayload(evt, "resp", "resp_text", marshalPayload(resp, &o))
 			}
 		}
 		addErrorFields(evt, err)
@@ -280,29 +325,86 @@ func splitFullMethod(full string) (service, method string) {
 	return s, ""
 }
 
+// payloadKind 标记 marshalPayload 产物的写入方式。
+type payloadKind uint8
+
+const (
+	payloadOmit payloadKind = iota // v == nil,req/resp 与 *_text 都不写
+	payloadJson                    // 合法 JSON 对象,原始字节直接 RawJSON 嵌入,零二次转义
+	payloadText                    // 文本(截断前缀/占位符/非 proto 值),走 *_text 字符串字段
+)
+
+// payloadValue 是 marshalPayload 的判别式结果,raw / text 按 kind 互斥有效。
+type payloadValue struct {
+	kind payloadKind
+	raw  []byte // payloadJson 时有效
+	text string // payloadText 时有效
+}
+
 // marshalPayload 把 req/resp 序列化为日志摘要。
-// proto.Message 走 protojson(typed nil 由 protojson 自身兜底返回 "{}");
-// 非 proto 用 fmt.Sprint 兜底,避免在拦截器里 panic;
-// mask 仅作用于 proto.Message 分支(JSON 结构已知);非 proto 兜底无 schema 不脱敏。
-// 顺序:protojson → applyMask → truncate(先 mask 再截断,避免被截断撕裂的 JSON 前缀漏字段)。
-func marshalPayload(v any, maxBytes int, mask map[string]struct{}) string {
+// 决策流:nil → omit;非 proto → fmt.Sprint 截断落 text(无 schema 不脱敏);
+// proto → wire size 预检(超限记占位符,省掉必然被截断的全量序列化)→ protojson →
+// mask(probe 预检命中才做 JSON 树往返)→ 超长截断落 text → 顶层非对象(wrapper 类型)落 text →
+// 合法 JSON 对象落 raw。
+// 先 mask 再截断,避免被截断撕裂的 JSON 前缀漏脱敏字段。
+// raw 分支给 zerolog RawJSON 用,两个前提由上游保证:protojson/goccy 会转义所有控制字符
+// (输出无裸换行),无效 UTF-8 在 Marshal 时报错走占位符分支。
+func marshalPayload(v any, o *options) payloadValue {
 	if v == nil {
-		return ""
+		return payloadValue{kind: payloadOmit}
 	}
-	var s string
-	if msg, ok := v.(proto.Message); ok {
-		buf, err := payloadMarshaler.Marshal(msg)
-		if err != nil {
-			return fmt.Sprintf("<marshal error: %v>", err)
-		}
-		if len(mask) > 0 {
-			buf = applyMask(buf, mask)
-		}
-		s = string(buf)
-	} else {
-		s = fmt.Sprint(v)
+	msg, ok := v.(proto.Message)
+	if !ok {
+		return payloadValue{kind: payloadText, text: truncate(fmt.Sprint(v), o.payloadMaxBytes)}
 	}
-	return truncate(s, maxBytes)
+	if o.sizeLimit > 0 {
+		if n := proto.Size(msg); n > o.sizeLimit {
+			name := msg.ProtoReflect().Descriptor().FullName()
+			return payloadValue{kind: payloadText, text: fmt.Sprintf(tooLargeFmt, name, n)}
+		}
+	}
+	buf, err := payloadMarshaler.Marshal(msg)
+	if err != nil {
+		return payloadValue{kind: payloadText, text: fmt.Sprintf("<marshal error: %v>", err)}
+	}
+	if len(o.maskProbes) > 0 && maskProbeHit(buf, o.maskProbes) {
+		buf = applyMask(buf, o.maskFields)
+	}
+	if o.payloadMaxBytes > 0 && len(buf) > o.payloadMaxBytes {
+		return payloadValue{kind: payloadText, text: truncate(string(buf), o.payloadMaxBytes)}
+	}
+	// wrapper 类型(StringValue/Duration 等)顶层输出是标量/数组,raw 嵌入会让 req/resp
+	// 字段跨日志行出现对象/非对象混型(ES mapping 冲突),统一落 text;顺带防御空 buf。
+	if len(buf) == 0 || buf[0] != '{' {
+		return payloadValue{kind: payloadText, text: string(buf)}
+	}
+	return payloadValue{kind: payloadJson, raw: buf}
+}
+
+// maskProbeHit 检查序列化输出中是否出现任一 mask key 的 `"key"` 字节串,
+// 全部未命中时调用方可跳过 applyMask 的整轮 JSON 树往返。
+// JSON 字符串值内部的引号必被转义为 \",`"key"` 不可能由值内容拼出,故无漏报;
+// 唯一误报是某字符串值整体恰等于 key(如 {"type":"password"}),代价仅是白做一次往返。
+func maskProbeHit(buf []byte, probes [][]byte) bool {
+	for _, p := range probes {
+		if bytes.Contains(buf, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// addPayload 按 payloadValue 的判别结果写入事件字段:完整 JSON 对象以 RawJSON 嵌入
+// jsonKey(零二次转义),文本走 textKey,omit 两个字段都不写。
+// 不变量:jsonKey 要么缺席要么必为 JSON 对象,textKey 要么缺席要么必为字符串,
+// 二者互斥,避免下游索引(ES 等)同字段混型。
+func addPayload(evt *zerolog.Event, jsonKey, textKey string, pv payloadValue) {
+	switch pv.kind {
+	case payloadJson:
+		evt.RawJSON(jsonKey, pv.raw)
+	case payloadText:
+		evt.Str(textKey, pv.text)
+	}
 }
 
 // applyMask 对 protojson 输出做字段级脱敏:解析为通用 JSON 树,递归替换命中 mask 的 key 的 value

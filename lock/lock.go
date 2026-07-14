@@ -38,14 +38,28 @@ var (
 	renewScript  = redis.NewScript(luaRenew)
 )
 
-// Manager 分布式锁工厂,持有 Redis 客户端与默认配置。
-type Manager struct {
+// Manager 定义分布式锁工厂的能力契约,NewManager 返回基于 Redis 的默认实现。
+// 自定义实现(如测试替身)必须复用本包哨兵错误(ErrLocked/ErrNotHeld 等),
+// 调用方依赖 errors.Is 做错误分支。
+type Manager interface {
+	// NewLocker 根据 key 创建一个绑定的 Locker。
+	// 同一 Locker 可重复 Lock/Unlock,每次 Lock 内部生成新 token。
+	// 注意:Locker 非并发安全,多 goroutine 应各自调用 NewLocker 拿独立实例。
+	NewLocker(key string) *Locker
+	// Run 在持有分布式锁期间执行 fn,并自动续租;其他持有者占锁时返回 ErrLocked。
+	// 续租失败时会取消传给 fn 的 context;fn 必须响应 ctx.Done() 才能及时退出。
+	// 返回值聚合 fn、续租与解锁错误。fencing token 通过 Locker.Fence() 读取。
+	Run(ctx context.Context, key string, fn func(context.Context, *Locker) error) error
+}
+
+// redisManager 是 Manager 的 Redis 实现,持有 Redis 客户端与默认配置。
+type redisManager struct {
 	rdb redis.UniversalClient
 	opt options
 }
 
-// NewManager 创建分布式锁工厂,rdb 为 nil 或 ttl 非正时返回错误。
-func NewManager(rdb redis.UniversalClient, opts ...Option) (*Manager, error) {
+// NewManager 创建基于 Redis 的分布式锁工厂,rdb 为 nil 或 ttl 非正时返回错误。
+func NewManager(rdb redis.UniversalClient, opts ...Option) (Manager, error) {
 	if rdb == nil {
 		return nil, ErrNilRedisClient
 	}
@@ -56,13 +70,11 @@ func NewManager(rdb redis.UniversalClient, opts ...Option) (*Manager, error) {
 	if o.ttl <= 0 {
 		return nil, fmt.Errorf("%w: ttl must be positive", ErrInvalidOption)
 	}
-	return &Manager{rdb: rdb, opt: o}, nil
+	return &redisManager{rdb: rdb, opt: o}, nil
 }
 
-// NewLocker 根据 key 创建一个绑定的 Locker。
-// 同一 Locker 可重复 Lock/Unlock,每次 Lock 内部生成新 token。
-// 注意:Locker 非并发安全,多 goroutine 应各自调用 NewLocker 拿独立实例。
-func (m *Manager) NewLocker(key string) *Locker {
+// NewLocker 按 Manager 配置拼出 fullKey/fenceKey 并装配 Locker。
+func (m *redisManager) NewLocker(key string) *Locker {
 	return &Locker{
 		rdb:           m.rdb,
 		rawKey:        key,
@@ -74,11 +86,9 @@ func (m *Manager) NewLocker(key string) *Locker {
 	}
 }
 
-// Run 在持有分布式锁期间执行 fn，并按 ttl/3 自动续租。
-// 续租失败时会取消传给 fn 的 context；fn 必须响应 ctx.Done() 才能及时退出。
-// 返回值聚合 fn、续租与解锁错误。fencing token 通过 Locker.Fence() 读取。
-// 即便 fn panic，defer 仍会取消续租 goroutine 并尝试解锁，让 panic 继续向上传播。
-func (m *Manager) Run(ctx context.Context, key string, fn func(context.Context, *Locker) error) (err error) {
+// Run 按 ttl/3 周期续租;即便 fn panic,defer 仍会取消续租 goroutine 并尝试解锁,
+// 让 panic 继续向上传播。
+func (m *redisManager) Run(ctx context.Context, key string, fn func(context.Context, *Locker) error) (err error) {
 	if fn == nil {
 		return fmt.Errorf("%w: run fn is nil", ErrInvalidOption)
 	}

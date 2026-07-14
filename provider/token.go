@@ -41,7 +41,7 @@ type TokenProvider struct {
 	enabled       bool
 	skips         map[string]struct{}
 	optionalSkips map[string]struct{}
-	tm            *token.Manager
+	tm            token.Manager
 }
 
 // Register 读 token.enabled / token.skips / token.optional_skips。
@@ -132,7 +132,7 @@ func (p *TokenProvider) Setup(ctx context.Context) error {
 //
 // 真实 token 失败原因仍通过 WithCause 挂在 BizError 上,服务端日志可排查,但不向客户端暴露。
 func tokenUnaryInterceptor(
-	tm *token.Manager,
+	tm token.Manager,
 	skips, optionalSkips map[string]struct{},
 ) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
@@ -187,11 +187,11 @@ func tokenUnaryInterceptor(
 
 // MustGetTokenManager 从容器获取 token 管理器,缺失时 panic。
 // 业务方在登录/退出/续期 handler 中调 Create/Refresh/Delete 等。
-func MustGetTokenManager(ctx context.Context) *token.Manager {
-	return ioc.MustGet[*token.Manager](ctx)
+func MustGetTokenManager(ctx context.Context) token.Manager {
+	return ioc.MustGet[token.Manager](ctx)
 }
 
 // GetTokenManager 从容器获取 token 管理器。
-func GetTokenManager(ctx context.Context) (*token.Manager, error) {
-	return ioc.Get[*token.Manager](ctx)
+func GetTokenManager(ctx context.Context) (token.Manager, error) {
+	return ioc.Get[token.Manager](ctx)
 }

@@ -8,5 +8,5 @@
 //   - Token.GetMeta / SetMeta 在不影响 TTL 的前提下读写元数据;SetMeta 设置的字段在 Refresh 后保留
 //
 // 物理 SaveTtl 大于逻辑 Ttl,留出过期排查窗口;并发刷新通过 Lua CAS 保证只有一个调用方拿到
-// 新 token,其它返回 ErrTokenInvalid(replay 防护)。
+// 新 token,其它返回 ErrTokenNotFound(replay 防护)。
 package token

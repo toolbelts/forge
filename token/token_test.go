@@ -29,7 +29,8 @@ func newTestRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 }
 
 // newTestManager 用更短的 Ttl 配置出测试用 Manager,便于覆盖过期路径。
-func newTestManager(t *testing.T, opts ...Option) (*miniredis.Miniredis, *Manager) {
+// 返回具体实现类型,测试需要访问未导出的 key helper。
+func newTestManager(t *testing.T, opts ...Option) (*miniredis.Miniredis, *redisManager) {
 	t.Helper()
 	mr, client := newTestRedis(t)
 	base := []Option{
@@ -43,7 +44,7 @@ func newTestManager(t *testing.T, opts ...Option) (*miniredis.Miniredis, *Manage
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
-	return mr, mgr
+	return mr, mgr.(*redisManager)
 }
 
 // mustSMembers 读取 set 成员并强制 fail 处理 err,简化断言。

@@ -140,8 +140,32 @@ func WithRefreshRotation(enable bool) Option {
 	}
 }
 
-// Manager 提供基于 Redis 的 token 全生命周期管理。
-type Manager struct {
+// Manager 定义 token 全生命周期管理的能力契约,NewManager 返回基于 Redis 的默认实现。
+// 自定义实现(如测试替身)必须复用本包哨兵错误(ErrTokenNotFound/ErrTokenExpired/
+// ErrTokenCorrupted 等),调用方依赖 errors.Is 做错误分支。
+type Manager interface {
+	// Create 为指定用户生成一对全新的 access + refresh token 并落库。
+	Create(ctx context.Context, userId int64, metadata map[string]string) (*Token, error)
+	// Validate 校验 access_token 是否有效。
+	// 不存在 → ErrTokenNotFound;载荷损坏 → ErrTokenCorrupted;逻辑过期 → ErrTokenExpired(数据仍可查)。
+	Validate(ctx context.Context, accessToken string) (*Token, error)
+	// Renew 重置已有 access_token 的逻辑过期时间,但不更换 token 字符串;
+	// 不延长 refresh_token 的过期时间 —— refresh 始终反映会话最长生命边界。
+	Renew(ctx context.Context, accessToken string) (*Token, error)
+	// Refresh 用 refresh_token 换取新的 access_token,旧 access_token 立即失效;
+	// 开启旋转(默认)时同步替换 refresh_token。并发 Refresh 仅一个成功,后到者收到 ErrTokenNotFound。
+	Refresh(ctx context.Context, refreshToken string) (*Token, error)
+	// Delete 删除单个 access_token 及其配套 refresh 与索引引用;token 不存在时返回 nil(幂等)。
+	Delete(ctx context.Context, accessToken string) error
+	// DeleteByUser 删除某用户的全部 token 及用户索引本身。
+	DeleteByUser(ctx context.Context, userId int64) error
+	// ListByUser 返回某用户当前全部 token,含已逻辑过期但仍在保存窗口内的条目,
+	// 调用方按 AccessExpires 自行判断状态。
+	ListByUser(ctx context.Context, userId int64) ([]*Token, error)
+}
+
+// redisManager 是 Manager 的 Redis 实现,关键路径走原子 Lua 与 TxPipeline。
+type redisManager struct {
 	rdb redis.UniversalClient
 	opt options
 }
@@ -183,9 +207,9 @@ var (
 	refreshScript = redis.NewScript(luaRefresh)
 )
 
-// NewManager 创建一个 token 管理器,并在启动期一次性校验配置合法性。
+// NewManager 创建基于 Redis 的 token 管理器,并在启动期一次性校验配置合法性。
 // Ttl 顺序约束:accessTtl < accessSaveTtl,refreshTtl < refreshSaveTtl,且 refreshTtl >= accessTtl。
-func NewManager(rdb redis.UniversalClient, opts ...Option) (*Manager, error) {
+func NewManager(rdb redis.UniversalClient, opts ...Option) (Manager, error) {
 	if rdb == nil {
 		return nil, ErrNilRedisClient
 	}
@@ -208,11 +232,11 @@ func NewManager(rdb redis.UniversalClient, opts ...Option) (*Manager, error) {
 	if o.generator == nil {
 		o.generator = defaultGenerator
 	}
-	return &Manager{rdb: rdb, opt: o}, nil
+	return &redisManager{rdb: rdb, opt: o}, nil
 }
 
-// Create 为指定用户生成一对全新的 access + refresh token,并写入 Redis 与用户索引。
-func (m *Manager) Create(ctx context.Context, userId int64, metadata map[string]string) (*Token, error) {
+// Create 用 TxPipeline 一次写入 access/refresh entry 与用户索引。
+func (m *redisManager) Create(ctx context.Context, userId int64, metadata map[string]string) (*Token, error) {
 	if userId <= 0 {
 		return nil, ErrInvalidUserId
 	}
@@ -249,9 +273,8 @@ func (m *Manager) Create(ctx context.Context, userId int64, metadata map[string]
 	return token, nil
 }
 
-// Validate 校验 access_token 是否有效。
-// Redis 中没有 → ErrTokenNotFound;载荷损坏 → ErrTokenCorrupted;逻辑过期 → ErrTokenExpired(数据仍可查)。
-func (m *Manager) Validate(ctx context.Context, accessToken string) (*Token, error) {
+// Validate 读 access entry 并做损坏/逻辑过期判定。
+func (m *redisManager) Validate(ctx context.Context, accessToken string) (*Token, error) {
 	if accessToken == "" {
 		return nil, ErrEmptyToken
 	}
@@ -272,9 +295,8 @@ func (m *Manager) Validate(ctx context.Context, accessToken string) (*Token, err
 	return token, nil
 }
 
-// Renew 重置已有 access_token 的逻辑过期时间与 Redis 保存时间,但不更换 token 字符串。
-// 不延长 refresh_token 的过期时间 —— refresh 始终反映会话最长生命边界。
-func (m *Manager) Renew(ctx context.Context, accessToken string) (*Token, error) {
+// Renew 先 Validate 再走 luaRenew 原子覆盖 access entry,避免与并发删除竞争。
+func (m *redisManager) Renew(ctx context.Context, accessToken string) (*Token, error) {
 	if accessToken == "" {
 		return nil, ErrEmptyToken
 	}
@@ -301,9 +323,8 @@ func (m *Manager) Renew(ctx context.Context, accessToken string) (*Token, error)
 	return existing, nil
 }
 
-// Refresh 用 refresh_token 换取新的 access_token,旧 access_token 立即失效。
-// 当 refreshRotation=true 时同步替换 refresh_token,旧 refresh_token 一并失效。
-func (m *Manager) Refresh(ctx context.Context, refreshToken string) (*Token, error) {
+// Refresh 走 luaRefresh 原子完成"校验旧 refresh → 失效旧 access → 写入新凭证 → 维护索引"。
+func (m *redisManager) Refresh(ctx context.Context, refreshToken string) (*Token, error) {
 	if refreshToken == "" {
 		return nil, ErrEmptyToken
 	}
@@ -375,9 +396,8 @@ func (m *Manager) Refresh(ctx context.Context, refreshToken string) (*Token, err
 	return next, nil
 }
 
-// Delete 删除单个 access_token 及其对应 refresh entry 与用户索引引用。
-// 当 token 已不存在时返回 nil(幂等)。
-func (m *Manager) Delete(ctx context.Context, accessToken string) error {
+// Delete 用 TxPipeline 清理 access/refresh entry 与索引引用;载荷损坏时降级为只删 access entry。
+func (m *redisManager) Delete(ctx context.Context, accessToken string) error {
 	if accessToken == "" {
 		return ErrEmptyToken
 	}
@@ -402,8 +422,8 @@ func (m *Manager) Delete(ctx context.Context, accessToken string) error {
 	return err
 }
 
-// DeleteByUser 删除某用户的全部 access/refresh entries 与用户索引本身。
-func (m *Manager) DeleteByUser(ctx context.Context, userId int64) error {
+// DeleteByUser 先 MGet 全部载荷再用 TxPipeline 批量删除 entries 与用户索引。
+func (m *redisManager) DeleteByUser(ctx context.Context, userId int64) error {
 	if userId <= 0 {
 		return ErrInvalidUserId
 	}
@@ -443,9 +463,8 @@ func (m *Manager) DeleteByUser(ctx context.Context, userId int64) error {
 	return err
 }
 
-// ListByUser 返回某用户当前持有的全部 token,包含 Redis 中尚存但已逻辑过期的条目,
-// 调用方可根据 AccessExpires 自行判断状态。同时惰性清理用户索引中的幽灵成员。
-func (m *Manager) ListByUser(ctx context.Context, userId int64) ([]*Token, error) {
+// ListByUser 读取全部载荷,同时惰性清理用户索引中的幽灵成员。
+func (m *redisManager) ListByUser(ctx context.Context, userId int64) ([]*Token, error) {
 	if userId <= 0 {
 		return nil, ErrInvalidUserId
 	}
@@ -492,17 +511,17 @@ func (m *Manager) ListByUser(ctx context.Context, userId int64) ([]*Token, error
 }
 
 // accessKey 拼接 access_token 在 Redis 中的 key。
-func (m *Manager) accessKey(accessToken string) string {
+func (m *redisManager) accessKey(accessToken string) string {
 	return m.opt.prefix + ":access:" + accessToken
 }
 
 // refreshKey 拼接 refresh_token 在 Redis 中的 key。
-func (m *Manager) refreshKey(refreshToken string) string {
+func (m *redisManager) refreshKey(refreshToken string) string {
 	return m.opt.prefix + ":refresh:" + refreshToken
 }
 
 // userKey 拼接用户索引在 Redis 中的 SET key。
-func (m *Manager) userKey(userId int64) string {
+func (m *redisManager) userKey(userId int64) string {
 	return m.opt.prefix + ":user:" + strconv.FormatInt(userId, 10)
 }
 

@@ -74,7 +74,7 @@ LIFO Shutdown 自动反向,无需手动管理。
 | 17 | `ErrorProvider` | 内二层 | 把裸 error / `context.*` / `status.Status` 归一化为 `errkit.Error` |
 | 18 | `RateLimitProvider` | 内三层 | Setup 同时构造 `*RedisRateLimiter` 实例 + 挂拦截器。在 protovalidate 之前砍 CPU |
 | 19 | `ValidateProvider` | 内四层 | protovalidate,纯内存 CEL |
-| 20 | `TokenProvider` | 最内层 | Setup 同时构造 `*token.Manager` 实例 + 挂拦截器。鉴权要查 Redis,放最后让畸形请求先被前面砍掉 |
+| 20 | `TokenProvider` | 最内层 | Setup 同时构造 `token.Manager` 实例 + 挂拦截器。鉴权要查 Redis,放最后让畸形请求先被前面砍掉 |
 
 > 即使不启用 gRPC,`InterceptorChain` 也是在 `GrpcProvider.Register` 阶段创建的 — 所以 `GrpcProvider` 必须 Use(可以 `enabled=false`),否则 ioc.MustGet 会 panic。
 
@@ -677,10 +677,10 @@ notify:
 | `TcpHandler` | `provider.GetTcpHandler(ctx)` / `provider.MustSetTcpHandler(ctx, h)` | tcp.enabled=true 时业务方注入 |
 | `*redis.Client` | `provider.MustGetRedis(ctx, "default")` | 实例名按 yaml |
 | `*bun.DB` | `provider.MustGetDb(ctx, "default")` | 同上 |
-| `*token.Manager` | `provider.MustGetTokenManager(ctx)` | token.enabled=true |
+| `token.Manager`(接口) | `provider.MustGetTokenManager(ctx)` | token.enabled=true |
 | `*ratelimit.RedisRateLimiter` | `provider.MustGetRateLimiter(ctx)` | ratelimit.enabled=true |
 | `*registry.Manager` | `provider.MustGetRegistryManager(ctx)` | registry.enabled=true |
-| `*lock.Manager` | `provider.MustGetLockManager(ctx)` | lock.enabled=true |
+| `lock.Manager`(接口) | `provider.MustGetLockManager(ctx)` | lock.enabled=true |
 | `*cron.Cron` | `provider.MustGetCron(ctx)` | cron.enabled=true |
 | `*jobqueue.Queue` | `provider.MustGetJobQueue(ctx)` | jobqueue.enabled=true |
 | `dbcache.Store` | `provider.MustGetDbcacheStore(ctx, "default")` | 实例名按 yaml `dbcache.<name>` |

@@ -15,10 +15,10 @@ const lockDefaultRedisName = "default"
 // LockProvider 基于 Redis 的分布式锁工厂。
 //
 // 编排约定:排在 RedisProvider 之后。
-// 不挂拦截器,只向容器注入 *lock.Manager 供业务 handler 通过 MustGetLockManager 获取。
+// 不挂拦截器,只向容器注入 lock.Manager 供业务 handler 通过 MustGetLockManager 获取。
 type LockProvider struct {
 	enabled bool
-	lm      *lock.Manager
+	lm      lock.Manager
 }
 
 // Register 读 lock.enabled,disabled 时 Setup 直接跳过。
@@ -79,11 +79,11 @@ func (p *LockProvider) Setup(ctx context.Context) error {
 
 // MustGetLockManager 从容器获取分布式锁工厂,缺失时 panic。
 // 业务方在需要互斥的 handler 中调 NewLocker(key) 拿到 *Locker 后再 Lock/Unlock。
-func MustGetLockManager(ctx context.Context) *lock.Manager {
-	return ioc.MustGet[*lock.Manager](ctx)
+func MustGetLockManager(ctx context.Context) lock.Manager {
+	return ioc.MustGet[lock.Manager](ctx)
 }
 
 // GetLockManager 从容器获取分布式锁工厂。
-func GetLockManager(ctx context.Context) (*lock.Manager, error) {
-	return ioc.Get[*lock.Manager](ctx)
+func GetLockManager(ctx context.Context) (lock.Manager, error) {
+	return ioc.Get[lock.Manager](ctx)
 }

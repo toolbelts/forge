@@ -25,14 +25,15 @@ func newTestRedis(t *testing.T) (*miniredis.Miniredis, *redis.Client) {
 	return mr, client
 }
 
-func newTestManager(t *testing.T, opts ...Option) (*miniredis.Miniredis, *Manager) {
+// newTestManager 返回具体实现类型,测试需要访问未导出的 opt 字段。
+func newTestManager(t *testing.T, opts ...Option) (*miniredis.Miniredis, *redisManager) {
 	t.Helper()
 	mr, client := newTestRedis(t)
 	m, err := NewManager(client, opts...)
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
-	return mr, m
+	return mr, m.(*redisManager)
 }
 
 func TestNewManager_NilRedis(t *testing.T) {
@@ -47,8 +48,8 @@ func TestWithTtl_NonPositiveKeepsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected default ttl to apply, got %v", err)
 	}
-	if m.opt.ttl != 30*time.Second {
-		t.Fatalf("expected default 30s ttl, got %v", m.opt.ttl)
+	if opt := m.(*redisManager).opt; opt.ttl != 30*time.Second {
+		t.Fatalf("expected default 30s ttl, got %v", opt.ttl)
 	}
 }
 
@@ -58,8 +59,8 @@ func TestWithPrefix_EmptyKeepsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new manager: %v", err)
 	}
-	if m.opt.prefix != "lock" {
-		t.Fatalf("expected default prefix lock, got %q", m.opt.prefix)
+	if opt := m.(*redisManager).opt; opt.prefix != "lock" {
+		t.Fatalf("expected default prefix lock, got %q", opt.prefix)
 	}
 }
 

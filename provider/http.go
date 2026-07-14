@@ -15,6 +15,10 @@ import (
 )
 
 // HttpProvider HTTP 服务提供者，根据 http.* 配置选择性启动并向容器注入 *http.ServeMux。
+//
+// 编排：
+//   - Register: 注入命名 "http" 的 *MiddlewareChain；读 enabled / addr 并 net.Listen，让端口冲突早失败
+//   - Setup: 从 IOC 取出 chain，用中间件包装 mux 作为 server handler
 type HttpProvider struct {
 	enabled         bool
 	listener        net.Listener
@@ -23,8 +27,10 @@ type HttpProvider struct {
 	shutdownTimeout time.Duration
 }
 
-// Register 当 http.enabled 为真时建立监听并构造 *http.ServeMux 与 *http.Server，将 mux 绑定到容器。
+// Register 注入 *MiddlewareChain；当 http.enabled 为真时建立监听并构造 *http.ServeMux 与 *http.Server，将 mux 绑定到容器。
 func (p *HttpProvider) Register(ctx context.Context) error {
+	ioc.MustInstanceNamed(ctx, httpMiddlewareChainName, &MiddlewareChain{})
+
 	v := ioc.MustGet[*viper.Viper](ctx)
 	p.enabled = v.GetBool("http.enabled")
 	if !p.enabled {
@@ -45,7 +51,7 @@ func (p *HttpProvider) Register(ctx context.Context) error {
 
 	p.mux = http.NewServeMux()
 	p.server = &http.Server{
-		Handler:           p.mux,
+		Handler:           p.mux, // 占位，Setup 阶段用 MiddlewareChain 包装后覆盖
 		ReadTimeout:       v.GetDuration("http.read_timeout"),
 		ReadHeaderTimeout: v.GetDuration("http.read_header_timeout"),
 		WriteTimeout:      v.GetDuration("http.write_timeout"),
@@ -59,8 +65,15 @@ func (p *HttpProvider) Register(ctx context.Context) error {
 	return nil
 }
 
-// Setup 无操作，业务方在自己的 Setup 中通过 MustGetHttpMux 注册路由。
+// Setup 当 enabled 时从容器取 MiddlewareChain，用中间件包装 mux 作为 server handler。
+// 中间件 Provider 必须 Use 在 HttpProvider 之前，此后追加的中间件会被静默丢弃；
+// 业务方仍在自己的 Setup 中通过 MustGetHttpMux 注册路由，路由注册时机与包装无关。
 func (p *HttpProvider) Setup(ctx context.Context) error {
+	if !p.enabled {
+		return nil
+	}
+
+	p.server.Handler = MustGetHttpMiddlewareChain(ctx).Handler(p.mux)
 	return nil
 }
 

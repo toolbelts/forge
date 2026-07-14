@@ -26,6 +26,10 @@ import (
 const gatewayConnName = "gateway"
 
 // GatewayProvider grpc-gateway v2 服务提供者，根据 gateway.* 配置选择性启动并向容器注入 *runtime.ServeMux 与 *grpc.ClientConn。
+//
+// 编排：
+//   - Register: 注入命名 "gateway" 的 *MiddlewareChain；建立监听、dial gRPC 后端并构造 mux 与 server
+//   - Setup: 从 IOC 取出 chain 包装 mux；trace 提取（withTracePropagation）保持在链外最外层
 type GatewayProvider struct {
 	enabled         bool
 	listener        net.Listener
@@ -37,8 +41,10 @@ type GatewayProvider struct {
 	traceEnabled    bool
 }
 
-// Register 当 gateway.enabled 为真时建立监听、dial gRPC 后端并构造 *runtime.ServeMux 与 *http.Server。
+// Register 注入 *MiddlewareChain；当 gateway.enabled 为真时建立监听、dial gRPC 后端并构造 *runtime.ServeMux 与 *http.Server。
 func (p *GatewayProvider) Register(ctx context.Context) error {
+	ioc.MustInstanceNamed(ctx, gatewayMiddlewareChainName, &MiddlewareChain{})
+
 	v := ioc.MustGet[*viper.Viper](ctx)
 	p.enabled = v.GetBool("gateway.enabled")
 	if !p.enabled {
@@ -82,13 +88,8 @@ func (p *GatewayProvider) Register(ctx context.Context) error {
 		runtime.WithMetadata(meta.Annotator),
 	)
 
-	handler := http.Handler(p.mux)
-	if p.traceEnabled {
-		handler = withTracePropagation(handler)
-	}
-
 	p.server = &http.Server{
-		Handler:           handler,
+		Handler:           p.mux, // 占位，Setup 阶段用 MiddlewareChain（及 trace 提取）包装后覆盖
 		ReadTimeout:       v.GetDuration("gateway.read_timeout"),
 		ReadHeaderTimeout: v.GetDuration("gateway.read_header_timeout"),
 		WriteTimeout:      v.GetDuration("gateway.write_timeout"),
@@ -103,8 +104,20 @@ func (p *GatewayProvider) Register(ctx context.Context) error {
 	return nil
 }
 
-// Setup 无操作，业务方在自己的 Setup 中通过 MustGetGatewayMux + MustGetGatewayConn 调 pb.RegisterXxxHandler 注册路由。
+// Setup 当 enabled 时从容器取 MiddlewareChain 包装 gateway mux；trace 提取保持在中间件之外的最外层，
+// 让所有中间件与业务逻辑都能拿到已接续上游 trace 的 ctx。中间件 Provider 必须 Use 在 GatewayProvider 之前，
+// 此后追加的中间件会被静默丢弃；业务方仍在自己的 Setup 中通过 MustGetGatewayMux + MustGetGatewayConn
+// 调 pb.RegisterXxxHandler 注册路由，路由注册时机与包装无关。
 func (p *GatewayProvider) Setup(ctx context.Context) error {
+	if !p.enabled {
+		return nil
+	}
+
+	handler := MustGetGatewayMiddlewareChain(ctx).Handler(p.mux)
+	if p.traceEnabled {
+		handler = withTracePropagation(handler)
+	}
+	p.server.Handler = handler
 	return nil
 }
 

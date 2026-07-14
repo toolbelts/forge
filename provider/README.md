@@ -35,7 +35,7 @@
 `App.Use(...)` 调用顺序决定两件事:
 
 1. **Register 阶段顺序** — 所有 Register 完成后才进入 Setup,但 Register 内部读取的容器实例必须在更早的 Provider 已注入。例:启用 instrumentation 时,`MetricsProvider`/`TraceProvider` 必须在 `RedisProvider` / `DatabaseProvider` 之前 — 后两者在 Register 时挂 OTel hook,需要全局 MeterProvider/TracerProvider 已就绪
-2. **Setup 阶段顺序** — `InterceptorChain.Use` 调用是 Setup 阶段的 side effect,而 `GrpcProvider.Setup` 读 chain 来构造 `*grpc.Server`。所以**所有拦截器 Provider 必须在 `GrpcProvider` 之前 Use**,否则 chain 在 Grpc 构造 server 时还是空的
+2. **Setup 阶段顺序** — `InterceptorChain.Use` 调用是 Setup 阶段的 side effect,而 `GrpcProvider.Setup` 读 chain 来构造 `*grpc.Server`。所以**所有拦截器 Provider 必须在 `GrpcProvider` 之前 Use**,否则 chain 在 Grpc 构造 server 时还是空的。`MiddlewareChain.Use` 同理:`HttpProvider.Setup` / `GatewayProvider.Setup` 读各自命名链(`http` / `gateway`)包装 server handler,**HTTP 中间件 Provider 必须在两者之前 Use**
 
 LIFO Shutdown 自动反向,无需手动管理。
 
@@ -83,10 +83,12 @@ LIFO Shutdown 自动反向,无需手动管理。
 | # | Provider | 说明 |
 |---|---|---|
 | 21 | `GrpcProvider` | `Register` 抢端口 + 注入 `*InterceptorChain`;`Setup` 阶段读 chain 构造 `*grpc.Server`。**所有拦截器 Provider 必须 Use 在它之前** |
-| 22 | `HttpProvider` | `*http.ServeMux` 注入容器 |
+| 22 | `HttpProvider` | `Register` 注入命名 `http` 的 `*MiddlewareChain` 并把 `*http.ServeMux` 注入容器;`Setup` 用链包装 mux。**HTTP 中间件 Provider 必须 Use 在它之前** |
 | 23 | `PprofProvider` | 复用 HttpProvider 的 mux,仅当 `pprof.enabled && http.enabled` 才挂 |
-| 24 | `GatewayProvider` | grpc-gateway,反向 dial gRPC 后端 |
+| 24 | `GatewayProvider` | grpc-gateway,反向 dial gRPC 后端;`Register` 注入命名 `gateway` 的 `*MiddlewareChain`,`Setup` 用链包装 gateway mux(trace 提取在链外最外层)。**HTTP 中间件 Provider 必须 Use 在它之前** |
 | 25 | `TcpProvider` | 通用 TCP accept loop,业务方通过 `MustSetTcpHandler(ctx, h)` 注入 `TcpHandler` |
+
+> `MiddlewareChain` 与 `InterceptorChain` 同理:即使 `http.enabled=false` / `gateway.enabled=false`,链也在对应 Provider 的 Register 阶段创建 — `HttpProvider` / `GatewayProvider` 必须 Use(可以 disabled),中间件 Provider 的 Setup 才能拿到链。注意中间件包装的是整个 server handler,pprof 等挂在 http mux 上的路由同样会被包裹。
 
 ### E. 注册中心(按需)
 
@@ -104,6 +106,26 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 ```
 
 `Use` 顺序 = 链表追加顺序 = 拦截器外→内执行顺序。原文见 `provider/interceptor.go:13`。
+
+### HTTP 中间件链
+
+HTTP 侧的对应机制是 `MiddlewareChain`(权威定义 `provider/middleware.go`),同样 **Use 顺序 = 外层执行顺序**。中间件 Provider 在自己的 Setup 中取出对应命名链追加,必须 Use 在 `HttpProvider` / `GatewayProvider` 之前:
+
+```go
+// 某中间件 Provider 的 Setup —— 必须 Use 在 GatewayProvider 之前
+chain := provider.MustGetGatewayMiddlewareChain(ctx)
+chain.Use(func(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body) // 在 grpc-gateway 消费 body 之前读取
+		_ = r.Body.Close()
+		r.Body = io.NopCloser(bytes.NewReader(body)) // 读完必须回填,下游才能再次消费
+		// r.Method / r.URL.RawQuery / body 可用于验签等场景
+		next.ServeHTTP(w, r)
+	})
+})
+```
+
+gateway 的 trace 提取(`withTracePropagation`)始终在所有中间件之外的最外层,中间件内可直接使用已接续上游 trace 的 ctx。
 
 ---
 
@@ -247,6 +269,8 @@ otelgrpc server stats handler 默认在 `trace.enabled` 或 `metrics.enabled` �
 | `idle_timeout` | duration | — | |
 | `shutdown_timeout` | duration | — | |
 
+HTTP 中间件无配置键,通过 `provider.MustGetHttpMiddlewareChain(ctx).Use(...)` 在 Setup 阶段挂载,见第 3 节。
+
 ### GatewayProvider — `gateway.*`
 
 | 键 | 类型 | 必填(enabled 时) | 说明 |
@@ -259,6 +283,8 @@ otelgrpc server stats handler 默认在 `trace.enabled` 或 `metrics.enabled` �
 JSON 编码固定使用 proto 字段名(`UseProtoNames=true`),枚举输出字符串,默认值输出到响应体。
 
 otelgrpc client stats handler 默认在 `trace.enabled` 或 `metrics.enabled` 任一开启时挂载,也可用 `trace.instrumentation.gateway` / `metrics.instrumentation.gateway` 单独覆盖。HTTP `traceparent` 提取跟随 `trace.instrumentation.gateway`。
+
+HTTP 中间件无配置键,通过 `provider.MustGetGatewayMiddlewareChain(ctx).Use(...)` 在 Setup 阶段挂载,见第 3 节。
 
 ### TcpProvider — `tcp.*`
 
@@ -672,8 +698,10 @@ notify:
 | `*grpc.Server` | `provider.MustGetGrpcServer(ctx)` | grpc.enabled=true 才存在 |
 | `net.Listener`(grpc) | `provider.MustGetGrpcListener(ctx)` | 同上 |
 | `*http.ServeMux` | `provider.MustGetHttpMux(ctx)` | http.enabled=true 才存在 |
+| `*provider.MiddlewareChain`(http) | `provider.MustGetHttpMiddlewareChain(ctx)` | HttpProvider 已 Use 即存在,与 enabled 无关 |
 | `*runtime.ServeMux`(gateway) | `provider.MustGetGatewayMux(ctx)` | gateway.enabled=true 才存在 |
 | `*grpc.ClientConn`(gateway) | `provider.MustGetGatewayConn(ctx)` | 同上 |
+| `*provider.MiddlewareChain`(gateway) | `provider.MustGetGatewayMiddlewareChain(ctx)` | GatewayProvider 已 Use 即存在,与 enabled 无关 |
 | `TcpHandler` | `provider.GetTcpHandler(ctx)` / `provider.MustSetTcpHandler(ctx, h)` | tcp.enabled=true 时业务方注入 |
 | `*redis.Client` | `provider.MustGetRedis(ctx, "default")` | 实例名按 yaml |
 | `*bun.DB` | `provider.MustGetDb(ctx, "default")` | 同上 |
@@ -697,6 +725,7 @@ notify:
 ## 7. 常见坑
 
 - **拦截器 Provider 必须在 GrpcProvider 之前 Use**:`InterceptorChain.Use` 是 Setup 阶段的 side effect,Setup 按 Use 顺序跑;`GrpcProvider.Setup` 读 chain 构造 server。如果拦截器 Provider 排在 GrpcProvider 之后,Grpc 拿到的 chain 是空的,所有拦截器丢失。**6 个拦截器内部顺序也必须严格按链外→内**:`Recovery → AccessLog → Error → RateLimit → Validate → Token`
+- **HTTP 中间件 Provider 必须在 HttpProvider/GatewayProvider 之前 Use**:`MiddlewareChain.Use` 是 Setup 阶段的 side effect;两个 Provider 的 Setup 读链包装 handler,之后追加的中间件被**静默丢弃**。链在 Register 阶段创建,即使 `enabled=false` 也要 Use 对应 Provider,否则 `MustGet*MiddlewareChain` panic
 - **`enabled=false` 与 `MustGet`**:`CronProvider`/`JobQueueProvider`/`LockProvider` 等关闭时不向容器注入实例,业务方调 `MustGet` 直接 panic。这是有意为之 —— 关闭某能力时不应允许业务方依赖它
 - **`viper.GetBool` / `GetInt` 在键缺失时返回零值**:对默认值非零的开关(`token.refresh_rotation` 默认 true、`lock.retry` 默认非零)必须用 `v.IsSet(...)` 守卫,否则会被误关
 - **Metrics / Trace 时序**:启用自动 instrumentation 时,必须 Use 在 Redis/Database/Gateway 之前。后三者的 Register 阶段可能挂 `redisotel.InstrumentTracing` / `bunotel.NewQueryHook` / `otelgrpc.NewClientHandler`,需要全局 MeterProvider/TracerProvider 已就绪。`GrpcProvider` 的 otelgrpc handler 在 Setup 阶段才装,顺序无强约束(Setup 永远晚于所有 Register)
@@ -718,5 +747,6 @@ go doc github.com/toolbelts/forge/provider | head
 源码导航:
 
 - 拦截器链顺序权威定义 — `provider/interceptor.go:13`
+- HTTP 中间件链编排约定 — `provider/middleware.go`
 - 生命周期阶段定义 — `ioc/app.go`,`ioc/doc.go`
 - 各 Provider 的 yaml 键覆盖率 — 逐文件搜 `v.GetXxx(`

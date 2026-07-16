@@ -35,7 +35,7 @@ var (
 // 生命周期:New → Subscribe* → Start → (运行中) → Stop。
 // Publish 在 Stop 前均可调用,与 worker 是否 Start 无关。
 type Queue struct {
-	client    *redis.Client
+	client    redis.UniversalClient
 	keyPrefix string
 
 	defaultMaxLen int            // 0 = 不限
@@ -80,7 +80,7 @@ return {n, 0}
 var scriptPublish = redis.NewScript(publishScript)
 
 // New 构造 Queue。client 必传;keyPrefix 为空时使用 "jobqueue:"。
-func New(client *redis.Client, keyPrefix string, opts ...QueueOption) (*Queue, error) {
+func New(client redis.UniversalClient, keyPrefix string, opts ...QueueOption) (*Queue, error) {
 	if client == nil {
 		return nil, ErrNilRedisClient
 	}

@@ -27,6 +27,7 @@
 | [`cron`](./cron/) | `robfig/cron/v3` 薄封装。默认 `SkipIfStillRunning + Recover`,6 字段秒级表达式 |
 | [`dbcache`](./dbcache/) | 数据库缓存(cache-aside),后端可选 memory/redis/tiered;singleflight 防击穿、负缓存防穿透;`NewBun` 自动反射主键 |
 | [`jobqueue`](./jobqueue/) | Redis `LIST + BRPOP/BLMPOP` 极简任务队列,at-most-once;反射推断 handler 入参类型;支持 per-topic 合并发送 |
+| [`reliablequeue`](./reliablequeue/) | Redis Streams 至少一次可靠队列;消费组 PEL + `XAUTOCLAIM` 恢复;支持结果先发布再 ACK、DLQ 与副本确认 |
 | [`lock`](./lock/) | Redis 分布式互斥锁,fence token + TTL 自动续租,加 / 续 / 解锁均走原子 Lua |
 | [`message`](./message/) | 邮件(SMTP / SendGrid)+ 短信(Twilio / BytePlus / Aliyun)多后端路由,per-recipient 优先级 fallback,html 模板自动转义 |
 | [`notify`](./notify/) | Telegram + Lark 运维通知,fire-and-forget,10s HTTP 超时,适合"容忍丢失"的告警场景 |
@@ -70,7 +71,7 @@ _ = app.Run(ctx, nil)
 
 完整可跑示例、推荐编排顺序、yaml 配置键参考 → [`provider/README.md`](./provider/README.md)。
 
-需要绕过 `provider` 直接使用某个子库(例如脚本里只想用 `lock` 或 `jobqueue`),按各子库 `doc.go` 直接 `import` 即可,所有子库都不强依赖 `provider` 或 `ioc`。
+需要绕过 `provider` 直接使用某个子库(例如脚本里只想用 `lock`、`jobqueue` 或 `reliablequeue`),按各子库 `doc.go` 直接 `import` 即可,所有子库都不强依赖 `provider` 或 `ioc`。
 
 ---
 

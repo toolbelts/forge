@@ -3,11 +3,12 @@ package provider
 import "github.com/spf13/viper"
 
 const (
-	observabilityComponentRedis    = "redis"
-	observabilityComponentDatabase = "database"
-	observabilityComponentGrpc     = "grpc"
-	observabilityComponentGateway  = "gateway"
-	observabilityComponentJobqueue = "jobqueue"
+	observabilityComponentRedis         = "redis"
+	observabilityComponentDatabase      = "database"
+	observabilityComponentGrpc          = "grpc"
+	observabilityComponentGateway       = "gateway"
+	observabilityComponentJobqueue      = "jobqueue"
+	observabilityComponentReliableQueue = "reliablequeue"
 )
 
 // traceInstrumentationEnabled 返回指定组件是否启用 trace 自动插桩。

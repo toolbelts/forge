@@ -15,7 +15,7 @@ import (
 
 // RedisProvider Redis 提供者，支持从配置加载多个 Redis 实例。
 type RedisProvider struct {
-	clients        map[string]*redis.Client
+	clients        map[string]redis.UniversalClient
 	traceEnabled   bool
 	metricsEnabled bool
 }
@@ -24,7 +24,7 @@ type RedisProvider struct {
 func (p *RedisProvider) Register(ctx context.Context) error {
 	v := ioc.MustGet[*viper.Viper](ctx)
 	redisMap := v.GetStringMap("redis")
-	p.clients = make(map[string]*redis.Client, len(redisMap))
+	p.clients = make(map[string]redis.UniversalClient, len(redisMap))
 	p.traceEnabled = traceInstrumentationEnabled(v, observabilityComponentRedis)
 	p.metricsEnabled = metricsInstrumentationEnabled(v, observabilityComponentRedis)
 
@@ -75,7 +75,7 @@ func (p *RedisProvider) Register(ctx context.Context) error {
 			return fmt.Errorf("redis [%s] ping failed: %w", name, err)
 		}
 
-		ioc.MustInstanceNamed(ctx, name, client)
+		ioc.MustInstanceNamed[redis.UniversalClient](ctx, name, client)
 		p.clients[name] = client
 		log.Ctx(ctx).Info().
 			Str("redis_name", name).
@@ -104,11 +104,11 @@ func (p *RedisProvider) Shutdown(ctx context.Context) error {
 }
 
 // GetRedis 从容器获取指定名称的 Redis 客户端。
-func GetRedis(ctx context.Context, name string) (*redis.Client, error) {
-	return ioc.GetNamed[*redis.Client](ctx, name)
+func GetRedis(ctx context.Context, name string) (redis.UniversalClient, error) {
+	return ioc.GetNamed[redis.UniversalClient](ctx, name)
 }
 
-// MustGetRedis 从容器获取指定名称的 Redis 客户端，缺失时 panic。
-func MustGetRedis(ctx context.Context, name string) *redis.Client {
-	return ioc.MustGetNamed[*redis.Client](ctx, name)
+// MustGetRedis 从容器获取指定名称的 Redis 通用客户端，缺失时 panic。
+func MustGetRedis(ctx context.Context, name string) redis.UniversalClient {
+	return ioc.MustGetNamed[redis.UniversalClient](ctx, name)
 }

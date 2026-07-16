@@ -110,7 +110,7 @@ func buildDbcacheStore(ctx context.Context, v *viper.Viper, prefix, storeType st
 }
 
 // resolveDbcacheRedis 抽出 redis/tiered 共用的"按 redis 名取 client + 读 key_prefix"逻辑。
-func resolveDbcacheRedis(ctx context.Context, v *viper.Viper, prefix string) (*redis.Client, string, error) {
+func resolveDbcacheRedis(ctx context.Context, v *viper.Viper, prefix string) (redis.UniversalClient, string, error) {
 	redisName := v.GetString(prefix + ".redis")
 	if redisName == "" {
 		redisName = dbcacheDefaultRedisName

@@ -30,16 +30,16 @@ const (
 	aliyunSmsNonceBytes = 16
 )
 
-// aliyunSmsSender 是 smsSender 的 Aliyun 国际版实现(raw mode)。
+// aliyunSmsSender 是 SmsSender 的 Aliyun 国际版实现(raw mode)。
 type aliyunSmsSender struct {
-	regionFilter
+	RegionFilter
 	cfg     AliyunSmsConfig
 	baseURL string
 	client  *resty.Client
 }
 
 // build 让 AliyunSmsConfig 实现 smsSpec 接口。
-func (c AliyunSmsConfig) build() (smsSender, error) {
+func (c AliyunSmsConfig) build() (SmsSender, error) {
 	return newAliyunSmsSender(c)
 }
 
@@ -49,14 +49,14 @@ func newAliyunSmsSender(cfg AliyunSmsConfig) (*aliyunSmsSender, error) {
 	}
 	client := resty.New().SetTimeout(pickTimeout(cfg.Timeout))
 	return &aliyunSmsSender{
-		regionFilter: regionFilter{Include: cfg.IncludeRegions, Exclude: cfg.ExcludeRegions},
+		RegionFilter: RegionFilter{Include: cfg.IncludeRegions, Exclude: cfg.ExcludeRegions},
 		cfg:          cfg,
 		baseURL:      strings.TrimRight(cfg.Endpoint, "/"),
 		client:       client,
 	}, nil
 }
 
-func (a *aliyunSmsSender) Mode() smsMode { return smsModeRaw }
+func (a *aliyunSmsSender) Mode() SmsMode { return SmsModeRaw }
 
 func (a *aliyunSmsSender) Name() string {
 	if a.cfg.Name == "" {

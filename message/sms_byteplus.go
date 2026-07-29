@@ -24,16 +24,16 @@ const (
 	bytePlusDateLayout = "20060102"
 )
 
-// bytePlusSender 是 smsSender 的 BytePlus 实现(template mode)。
+// bytePlusSender 是 SmsSender 的 BytePlus 实现(template mode)。
 type bytePlusSender struct {
-	regionFilter
+	RegionFilter
 	cfg     BytePlusConfig
 	baseURL string
 	client  *resty.Client
 }
 
 // build 让 BytePlusConfig 实现 smsSpec 接口。
-func (c BytePlusConfig) build() (smsSender, error) {
+func (c BytePlusConfig) build() (SmsSender, error) {
 	return newBytePlusSender(c)
 }
 
@@ -44,14 +44,14 @@ func newBytePlusSender(cfg BytePlusConfig) (*bytePlusSender, error) {
 	}
 	client := resty.New().SetTimeout(pickTimeout(cfg.Timeout))
 	return &bytePlusSender{
-		regionFilter: regionFilter{Include: cfg.IncludeRegions, Exclude: cfg.ExcludeRegions},
+		RegionFilter: RegionFilter{Include: cfg.IncludeRegions, Exclude: cfg.ExcludeRegions},
 		cfg:          cfg,
 		baseURL:      bytePlusBaseURL,
 		client:       client,
 	}, nil
 }
 
-func (b *bytePlusSender) Mode() smsMode { return smsModeTemplate }
+func (b *bytePlusSender) Mode() SmsMode { return SmsModeTemplate }
 
 func (b *bytePlusSender) Name() string {
 	if b.cfg.Name == "" {

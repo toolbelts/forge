@@ -209,7 +209,7 @@ func TestAliyunCn_HttpErrorPropagated(t *testing.T) {
 
 func TestAliyunCn_Mode(t *testing.T) {
 	s := newAliyunCnTestSender(t, "http://x", "Sign")
-	if s.Mode() != smsModeTemplate {
+	if s.Mode() != SmsModeTemplate {
 		t.Fatalf("aliyun-cn should be template mode, got %v", s.Mode())
 	}
 	if !strings.HasPrefix(s.Name(), "aliyun-cn") {

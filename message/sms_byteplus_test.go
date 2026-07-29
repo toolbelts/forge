@@ -134,7 +134,7 @@ func TestCanonicalQueryString_SortsByKey(t *testing.T) {
 
 func TestBytePlus_Mode(t *testing.T) {
 	s := newBytePlusTestSender(t, "http://x")
-	if s.Mode() != smsModeTemplate {
+	if s.Mode() != SmsModeTemplate {
 		t.Fatalf("byteplus should be template mode, got %v", s.Mode())
 	}
 }

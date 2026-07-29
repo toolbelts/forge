@@ -8,18 +8,18 @@ import (
 	sgmail "github.com/sendgrid/sendgrid-go/helpers/mail"
 )
 
-// sendGridSender 是 emailSender 的 SendGrid HTTP API 实现,基于 sendgrid/sendgrid-go。
+// sendGridSender 是 EmailSender 的 SendGrid HTTP API 实现,基于 sendgrid/sendgrid-go。
 //
 // 走 v3 mail/send 端点;同一收件人列表合并到一个 Personalization 内,
 // Cc / Bcc 同 personalization,与 Twilio SendGrid 控制台行为一致。
 type sendGridSender struct {
-	domainFilter
+	DomainFilter
 	cfg  SendGridConfig
 	host string // 测试覆盖用,空 → 走 sendgrid-go 默认 host (api.sendgrid.com)
 }
 
 // build 让 SendGridConfig 实现 emailSpec 接口。
-func (c SendGridConfig) build() (emailSender, error) {
+func (c SendGridConfig) build() (EmailSender, error) {
 	return newSendGridSender(c)
 }
 
@@ -28,7 +28,7 @@ func newSendGridSender(cfg SendGridConfig) (*sendGridSender, error) {
 		return nil, fmt.Errorf("message: sendgrid %q missing api_key/from", cfg.Name)
 	}
 	return &sendGridSender{
-		domainFilter: domainFilter{Include: cfg.IncludeDomains, Exclude: cfg.ExcludeDomains},
+		DomainFilter: DomainFilter{Include: cfg.IncludeDomains, Exclude: cfg.ExcludeDomains},
 		cfg:          cfg,
 	}, nil
 }

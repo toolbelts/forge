@@ -136,7 +136,7 @@ func TestAliyun_HttpErrorPropagated(t *testing.T) {
 
 func TestAliyun_Mode(t *testing.T) {
 	s := newAliyunTestSender(t, "http://x")
-	if s.Mode() != smsModeRaw {
+	if s.Mode() != SmsModeRaw {
 		t.Fatalf("aliyun should be raw mode, got %v", s.Mode())
 	}
 }

@@ -122,12 +122,12 @@ type AliyunCnSmsConfig struct {
 // emailSpec 是一个待构建的 email 后端规格,build 在 New() 内被调用。
 // 配置类型(SmtpConfig / SendGridConfig)分别实现该接口。
 type emailSpec interface {
-	build() (emailSender, error)
+	build() (EmailSender, error)
 }
 
 // smsSpec 是一个待构建的 sms 后端规格。
 type smsSpec interface {
-	build() (smsSender, error)
+	build() (SmsSender, error)
 }
 
 // templateSpec 保存待编译的邮件模板原始字符串,New() 时统一 compile。
@@ -173,6 +173,55 @@ func WithSendGrid(cfg SendGridConfig) Option {
 		c.emailSpecs = append(c.emailSpecs, cfg)
 	}
 }
+
+// WithSmsSender 注册一个【外部实现】的短信后端。
+//
+// ★ 这是给 forge 之外的通道用的入口。
+//
+// forge 只内置真正通用的那几家（Twilio / BytePlus / Aliyun）。地区性通道
+// ——比如只覆盖印尼的 Kirim、只覆盖某国的本地网关——不该进基座：
+// 它们的接口形态、错误码、号码规范都只对一个市场成立，放进来之后每个
+// 使用 forge 的项目都要背着一堆自己用不到的 backend 和它们的依赖。
+//
+// 实现方在自己的仓库里实现 SmsSender 即可（嵌入 RegionFilter 白拿 Accepts），
+// 然后用这个 Option 注册进来，与内置 backend 共享同一套 fallback 顺序。
+//
+// 传 nil 会记一条配置错误而不是静默忽略——静默忽略的表现是
+// 「配了却不生效」，而那在发短信这种事上要到用户收不到码时才发现。
+func WithSmsSender(sender SmsSender) Option {
+	return func(c *config) {
+		if sender == nil {
+			c.errs = append(c.errs, fmt.Errorf("message: WithSmsSender got a nil sender"))
+			return
+		}
+		c.smsSpecs = append(c.smsSpecs, builtSmsSpec{sender})
+	}
+}
+
+// WithEmailSender 注册一个【外部实现】的邮件后端。语义同 WithSmsSender。
+func WithEmailSender(sender EmailSender) Option {
+	return func(c *config) {
+		if sender == nil {
+			c.errs = append(c.errs, fmt.Errorf("message: WithEmailSender got a nil sender"))
+			return
+		}
+		c.emailSpecs = append(c.emailSpecs, builtEmailSpec{sender})
+	}
+}
+
+// builtSmsSpec 把一个【已经构造好】的 sender 适配成 smsSpec。
+//
+// 内置 backend 走的是「Config 实现 smsSpec，New() 时才 build」，
+// 好处是参数校验统一在 New() 报错。外部 sender 由实现方自己构造，
+// 它的校验也在实现方的构造函数里，到这里已经是成品，直接返回即可。
+type builtSmsSpec struct{ sender SmsSender }
+
+func (b builtSmsSpec) build() (SmsSender, error) { return b.sender, nil }
+
+// builtEmailSpec 同 builtSmsSpec。
+type builtEmailSpec struct{ sender EmailSender }
+
+func (b builtEmailSpec) build() (EmailSender, error) { return b.sender, nil }
 
 // WithEmailTemplate 注册一个邮件模板,启动期 parse,运行期按 id 查找渲染。
 // 三个 body 字段都可空(对应部分跳过渲染),id 为空则忽略整个模板。

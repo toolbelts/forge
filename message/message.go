@@ -10,8 +10,8 @@ import (
 
 // Manager 是邮件 + 短信发送门面,通过 New() 构造,内部 senders 都是有序列表。
 type Manager struct {
-	email     []emailSender             // 顺序即 fallback 优先级
-	sms       []smsSender               // 顺序即 fallback 优先级,另叠加 mode 过滤
+	email     []EmailSender             // 顺序即 fallback 优先级
+	sms       []SmsSender               // 顺序即 fallback 优先级,另叠加 mode 过滤
 	templates map[string]*emailTemplate // 邮件模板,id → 编译好的 template
 }
 
@@ -119,7 +119,7 @@ func (m *Manager) SendEmail(ctx context.Context, msg EmailMessage) error {
 // SendSms 按消息字段判定所需 mode,然后走「单号码 + provider fallback」。
 //
 // 路由规则:
-//   - 按 m.sms 优先级遍历 sender:同时满足 mode 兼容(smsMode.supports)与区号筛选
+//   - 按 m.sms 优先级遍历 sender:同时满足 mode 兼容(SmsMode.supports)与区号筛选
 //     (sender.Accepts)才会被选中,首个发送成功胜出。
 //   - 若所有兼容 sender 都失败 → 包装最后一次失败的错误,错误文本带上 To。
 //

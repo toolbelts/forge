@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// fakeEmailSender 是 emailSender 的测试 stub,记录 Send 调用并按预设序列返回错误。
+// fakeEmailSender 是 EmailSender 的测试 stub,记录 Send 调用并按预设序列返回错误。
 type fakeEmailSender struct {
 	name    string
 	errs    []error // 第 N 次 Send 返回 errs[N];超界则返回 nil
@@ -40,7 +40,7 @@ func (f *fakeEmailSender) Send(_ context.Context, msg EmailMessage) error {
 
 type fakeSmsSender struct {
 	name    string
-	mode    smsMode
+	mode    SmsMode
 	errs    []error
 	calls   int
 	lastTo  string
@@ -48,7 +48,7 @@ type fakeSmsSender struct {
 }
 
 func (f *fakeSmsSender) Name() string  { return f.name }
-func (f *fakeSmsSender) Mode() smsMode { return f.mode }
+func (f *fakeSmsSender) Mode() SmsMode { return f.mode }
 func (f *fakeSmsSender) Accepts(to string) bool {
 	if f.accepts != nil {
 		return f.accepts(to)
@@ -83,7 +83,7 @@ func TestSendEmail_FallbackOnFirstFailure(t *testing.T) {
 	primary := &fakeEmailSender{name: "p", errs: []error{fmt.Errorf("dial timeout")}}
 	fallback := &fakeEmailSender{name: "f"}
 	m := &Manager{
-		email:     []emailSender{primary, fallback},
+		email:     []EmailSender{primary, fallback},
 		templates: map[string]*emailTemplate{},
 	}
 	if err := m.SendEmail(context.Background(), validEmail()); err != nil {
@@ -97,7 +97,7 @@ func TestSendEmail_FallbackOnFirstFailure(t *testing.T) {
 func TestSendEmail_AllFailReturnsLastErr(t *testing.T) {
 	last := fmt.Errorf("last error")
 	m := &Manager{
-		email: []emailSender{
+		email: []EmailSender{
 			&fakeEmailSender{name: "p", errs: []error{fmt.Errorf("first error")}},
 			&fakeEmailSender{name: "f", errs: []error{last}},
 		},
@@ -116,7 +116,7 @@ func TestSendEmail_StopsOnFirstSuccess(t *testing.T) {
 	primary := &fakeEmailSender{name: "p"}
 	fallback := &fakeEmailSender{name: "f"}
 	m := &Manager{
-		email:     []emailSender{primary, fallback},
+		email:     []EmailSender{primary, fallback},
 		templates: map[string]*emailTemplate{},
 	}
 	if err := m.SendEmail(context.Background(), validEmail()); err != nil {
@@ -132,7 +132,7 @@ func TestSendEmail_StopsOnFirstSuccess(t *testing.T) {
 
 func TestSendEmail_InvalidMessage(t *testing.T) {
 	m := &Manager{
-		email:     []emailSender{&fakeEmailSender{name: "p"}},
+		email:     []EmailSender{&fakeEmailSender{name: "p"}},
 		templates: map[string]*emailTemplate{},
 	}
 	cases := []EmailMessage{
@@ -150,7 +150,7 @@ func TestSendEmail_InvalidMessage(t *testing.T) {
 
 func TestSendEmail_TemplateNotFound(t *testing.T) {
 	m := &Manager{
-		email:     []emailSender{&fakeEmailSender{name: "p"}},
+		email:     []EmailSender{&fakeEmailSender{name: "p"}},
 		templates: map[string]*emailTemplate{},
 	}
 	err := m.SendEmail(context.Background(), EmailMessage{To: "a@b", TemplateId: "missing"})
@@ -166,7 +166,7 @@ func TestSendEmail_TemplateRendersAndDispatches(t *testing.T) {
 	}
 	sender := &fakeEmailSender{name: "p"}
 	m := &Manager{
-		email:     []emailSender{sender},
+		email:     []EmailSender{sender},
 		templates: map[string]*emailTemplate{"welcome": tpl},
 	}
 	err = m.SendEmail(context.Background(), EmailMessage{
@@ -185,10 +185,10 @@ func TestSendEmail_TemplateRendersAndDispatches(t *testing.T) {
 // TestSendEmail_DomainFilterIncludeOnly include 命中才路由,不命中且无其它 sender → ErrNoCompatibleEmailSender。
 func TestSendEmail_DomainFilterIncludeOnly(t *testing.T) {
 	cn := &fakeEmailSender{name: "cn", accepts: func(addr string) bool {
-		return domainFilter{Include: []string{".cn"}}.Accepts(addr)
+		return DomainFilter{Include: []string{".cn"}}.Accepts(addr)
 	}}
 	m := &Manager{
-		email:     []emailSender{cn},
+		email:     []EmailSender{cn},
 		templates: map[string]*emailTemplate{},
 	}
 	if err := m.SendEmail(context.Background(), EmailMessage{
@@ -220,13 +220,13 @@ func TestSendEmail_DomainFilterIncludeOnly(t *testing.T) {
 // 应分别打到对应 provider,Cc/Bcc 跟随选中的 sender 一次性下发。
 func TestSendEmail_DomainFilterRoutesPerCall(t *testing.T) {
 	cn := &fakeEmailSender{name: "cn", accepts: func(addr string) bool {
-		return domainFilter{Include: []string{".cn"}}.Accepts(addr)
+		return DomainFilter{Include: []string{".cn"}}.Accepts(addr)
 	}}
 	intl := &fakeEmailSender{name: "intl", accepts: func(addr string) bool {
-		return domainFilter{Exclude: []string{".cn"}}.Accepts(addr)
+		return DomainFilter{Exclude: []string{".cn"}}.Accepts(addr)
 	}}
 	m := &Manager{
-		email:     []emailSender{cn, intl},
+		email:     []EmailSender{cn, intl},
 		templates: map[string]*emailTemplate{},
 	}
 
@@ -261,7 +261,7 @@ func TestSendEmail_DomainFilterRoutesPerCall(t *testing.T) {
 func TestSendEmail_FailureSurfacesTo(t *testing.T) {
 	a := &fakeEmailSender{name: "a", errs: []error{fmt.Errorf("a boom")}}
 	m := &Manager{
-		email:     []emailSender{a},
+		email:     []EmailSender{a},
 		templates: map[string]*emailTemplate{},
 	}
 	err := m.SendEmail(context.Background(), EmailMessage{
@@ -280,22 +280,22 @@ func TestSendEmail_FailureSurfacesTo(t *testing.T) {
 func TestDomainFilter_AcceptsLogic(t *testing.T) {
 	cases := []struct {
 		name   string
-		filter domainFilter
+		filter DomainFilter
 		addr   string
 		want   bool
 	}{
-		{"empty allows all", domainFilter{}, "a@example.cn", true},
-		{"include hit suffix", domainFilter{Include: []string{".cn"}}, "a@example.cn", true},
-		{"include hit exact", domainFilter{Include: []string{"gmail.com"}}, "b@gmail.com", true},
-		{"include miss", domainFilter{Include: []string{".cn"}}, "b@gmail.com", false},
-		{"exclude hit", domainFilter{Exclude: []string{".cn"}}, "a@example.cn", false},
-		{"exclude miss", domainFilter{Exclude: []string{".cn"}}, "b@gmail.com", true},
-		{"include+exclude both hit → reject", domainFilter{Include: []string{".cn"}, Exclude: []string{".cn"}}, "a@example.cn", false},
-		{"case-insensitive address", domainFilter{Include: []string{".cn"}}, "A@Example.CN", true},
-		{"case-insensitive suffix", domainFilter{Include: []string{".CN"}}, "a@example.cn", true},
-		{"no @ falls back to default match", domainFilter{Include: []string{"example.cn"}}, "example.cn", true},
-		{"empty suffix in list ignored", domainFilter{Include: []string{"", ".cn"}}, "b@gmail.com", false},
-		{"sub-domain matches parent suffix", domainFilter{Include: []string{".cn"}}, "x@a.b.cn", true},
+		{"empty allows all", DomainFilter{}, "a@example.cn", true},
+		{"include hit suffix", DomainFilter{Include: []string{".cn"}}, "a@example.cn", true},
+		{"include hit exact", DomainFilter{Include: []string{"gmail.com"}}, "b@gmail.com", true},
+		{"include miss", DomainFilter{Include: []string{".cn"}}, "b@gmail.com", false},
+		{"exclude hit", DomainFilter{Exclude: []string{".cn"}}, "a@example.cn", false},
+		{"exclude miss", DomainFilter{Exclude: []string{".cn"}}, "b@gmail.com", true},
+		{"include+exclude both hit → reject", DomainFilter{Include: []string{".cn"}, Exclude: []string{".cn"}}, "a@example.cn", false},
+		{"case-insensitive address", DomainFilter{Include: []string{".cn"}}, "A@Example.CN", true},
+		{"case-insensitive suffix", DomainFilter{Include: []string{".CN"}}, "a@example.cn", true},
+		{"no @ falls back to default match", DomainFilter{Include: []string{"example.cn"}}, "example.cn", true},
+		{"empty suffix in list ignored", DomainFilter{Include: []string{"", ".cn"}}, "b@gmail.com", false},
+		{"sub-domain matches parent suffix", DomainFilter{Include: []string{".cn"}}, "x@a.b.cn", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -316,7 +316,7 @@ func TestSendSms_NoSender(t *testing.T) {
 func TestSendSms_NoCompatibleMode(t *testing.T) {
 	// 仅 Twilio (raw),消息却用 template mode
 	m := &Manager{
-		sms: []smsSender{&fakeSmsSender{name: "t", mode: smsModeRaw}},
+		sms: []SmsSender{&fakeSmsSender{name: "t", mode: SmsModeRaw}},
 	}
 	err := m.SendSms(context.Background(), SmsMessage{To: "+1", TemplateId: "tpl"})
 	if !errors.Is(err, ErrNoCompatibleSmsSender) {
@@ -325,9 +325,9 @@ func TestSendSms_NoCompatibleMode(t *testing.T) {
 }
 
 func TestSendSms_FilterByMode(t *testing.T) {
-	rawSender := &fakeSmsSender{name: "t", mode: smsModeRaw, errs: []error{fmt.Errorf("twilio fail")}}
-	tplSender := &fakeSmsSender{name: "bp", mode: smsModeTemplate}
-	m := &Manager{sms: []smsSender{rawSender, tplSender}}
+	rawSender := &fakeSmsSender{name: "t", mode: SmsModeRaw, errs: []error{fmt.Errorf("twilio fail")}}
+	tplSender := &fakeSmsSender{name: "bp", mode: SmsModeTemplate}
+	m := &Manager{sms: []SmsSender{rawSender, tplSender}}
 
 	// template mode → 跳过 raw sender,直接打到 template sender
 	err := m.SendSms(context.Background(), SmsMessage{To: "+1", TemplateId: "tpl"})
@@ -343,9 +343,9 @@ func TestSendSms_FilterByMode(t *testing.T) {
 }
 
 func TestSendSms_FallbackBetweenCompatibleSenders(t *testing.T) {
-	a := &fakeSmsSender{name: "a", mode: smsModeRaw, errs: []error{fmt.Errorf("a fail")}}
-	b := &fakeSmsSender{name: "b", mode: smsModeRaw}
-	m := &Manager{sms: []smsSender{a, b}}
+	a := &fakeSmsSender{name: "a", mode: SmsModeRaw, errs: []error{fmt.Errorf("a fail")}}
+	b := &fakeSmsSender{name: "b", mode: SmsModeRaw}
+	m := &Manager{sms: []SmsSender{a, b}}
 	if err := m.SendSms(context.Background(), SmsMessage{To: "+1", Content: "hi"}); err != nil {
 		t.Fatalf("expected fallback success, got %v", err)
 	}
@@ -355,8 +355,8 @@ func TestSendSms_FallbackBetweenCompatibleSenders(t *testing.T) {
 }
 
 func TestSendSms_BothModeAcceptsAnything(t *testing.T) {
-	s := &fakeSmsSender{name: "x", mode: smsModeBoth}
-	m := &Manager{sms: []smsSender{s}}
+	s := &fakeSmsSender{name: "x", mode: SmsModeBoth}
+	m := &Manager{sms: []SmsSender{s}}
 	for _, msg := range []SmsMessage{
 		{To: "+1", Content: "raw"},
 		{To: "+1", TemplateId: "t"},
@@ -368,7 +368,7 @@ func TestSendSms_BothModeAcceptsAnything(t *testing.T) {
 }
 
 func TestSendSms_InvalidMessage(t *testing.T) {
-	m := &Manager{sms: []smsSender{&fakeSmsSender{mode: smsModeBoth}}}
+	m := &Manager{sms: []SmsSender{&fakeSmsSender{mode: SmsModeBoth}}}
 	cases := []SmsMessage{
 		{},
 		{To: "+1"},      // neither Content nor TemplateId
@@ -418,10 +418,10 @@ func TestNew_BadTemplateFailsFast(t *testing.T) {
 // TestSendSms_RegionFilterIncludeOnly include_regions 命中才路由到该 sender,
 // 不命中且无其它兼容 sender → ErrNoCompatibleSmsSender。
 func TestSendSms_RegionFilterIncludeOnly(t *testing.T) {
-	cn := &fakeSmsSender{name: "cn", mode: smsModeRaw, accepts: func(to string) bool {
-		return regionFilter{Include: []string{"86"}}.Accepts(to)
+	cn := &fakeSmsSender{name: "cn", mode: SmsModeRaw, accepts: func(to string) bool {
+		return RegionFilter{Include: []string{"86"}}.Accepts(to)
 	}}
-	m := &Manager{sms: []smsSender{cn}}
+	m := &Manager{sms: []SmsSender{cn}}
 	if err := m.SendSms(context.Background(), SmsMessage{To: "+8613800138000", Content: "hi"}); err != nil {
 		t.Fatalf("+86 should route to cn: %v", err)
 	}
@@ -441,13 +441,13 @@ func TestSendSms_RegionFilterIncludeOnly(t *testing.T) {
 
 // TestSendSms_RegionFilterRoutesPerCall 区号互斥的两个 sender,不同号码独立调用各走各的,互不重叠。
 func TestSendSms_RegionFilterRoutesPerCall(t *testing.T) {
-	cn := &fakeSmsSender{name: "cn", mode: smsModeRaw, accepts: func(to string) bool {
-		return regionFilter{Include: []string{"86"}}.Accepts(to)
+	cn := &fakeSmsSender{name: "cn", mode: SmsModeRaw, accepts: func(to string) bool {
+		return RegionFilter{Include: []string{"86"}}.Accepts(to)
 	}}
-	intl := &fakeSmsSender{name: "intl", mode: smsModeRaw, accepts: func(to string) bool {
-		return regionFilter{Exclude: []string{"86"}}.Accepts(to)
+	intl := &fakeSmsSender{name: "intl", mode: SmsModeRaw, accepts: func(to string) bool {
+		return RegionFilter{Exclude: []string{"86"}}.Accepts(to)
 	}}
-	m := &Manager{sms: []smsSender{cn, intl}}
+	m := &Manager{sms: []SmsSender{cn, intl}}
 	for _, to := range []string{"+8613800138000", "+15551234567"} {
 		if err := m.SendSms(context.Background(), SmsMessage{To: to, Content: "hi"}); err != nil {
 			t.Fatalf("send %s: %v", to, err)
@@ -463,8 +463,8 @@ func TestSendSms_RegionFilterRoutesPerCall(t *testing.T) {
 
 // TestSendSms_FailureSurfacesTo 单号码所有兼容 sender 都失败时,错误文本应包含该号码。
 func TestSendSms_FailureSurfacesTo(t *testing.T) {
-	a := &fakeSmsSender{name: "a", mode: smsModeRaw, errs: []error{fmt.Errorf("boom")}}
-	m := &Manager{sms: []smsSender{a}}
+	a := &fakeSmsSender{name: "a", mode: SmsModeRaw, errs: []error{fmt.Errorf("boom")}}
+	m := &Manager{sms: []SmsSender{a}}
 	err := m.SendSms(context.Background(), SmsMessage{To: "+15551234567", Content: "hi"})
 	if err == nil {
 		t.Fatal("expected error when sender fails")
@@ -477,21 +477,21 @@ func TestSendSms_FailureSurfacesTo(t *testing.T) {
 func TestRegionFilter_AcceptsLogic(t *testing.T) {
 	cases := []struct {
 		name   string
-		filter regionFilter
+		filter RegionFilter
 		to     string
 		want   bool
 	}{
-		{"empty allows all", regionFilter{}, "+8613800138000", true},
-		{"include hit", regionFilter{Include: []string{"86"}}, "+8613800138000", true},
-		{"include miss", regionFilter{Include: []string{"86"}}, "+15551234567", false},
-		{"exclude hit", regionFilter{Exclude: []string{"86"}}, "+8613800138000", false},
-		{"exclude miss", regionFilter{Exclude: []string{"86"}}, "+15551234567", true},
-		{"include+exclude both hit → reject", regionFilter{Include: []string{"86"}, Exclude: []string{"86"}}, "+8613800138000", false},
-		{"00 prefix recognized", regionFilter{Include: []string{"86"}}, "008613800138000", true},
-		{"no + or 00 still works", regionFilter{Include: []string{"86"}}, "8613800138000", true},
-		{"longer prefix selectivity", regionFilter{Include: []string{"852"}}, "+85298765432", true},
-		{"longer prefix not matching shorter", regionFilter{Include: []string{"852"}}, "+8613800138000", false},
-		{"empty prefix in list ignored", regionFilter{Include: []string{"", "86"}}, "+15551234567", false},
+		{"empty allows all", RegionFilter{}, "+8613800138000", true},
+		{"include hit", RegionFilter{Include: []string{"86"}}, "+8613800138000", true},
+		{"include miss", RegionFilter{Include: []string{"86"}}, "+15551234567", false},
+		{"exclude hit", RegionFilter{Exclude: []string{"86"}}, "+8613800138000", false},
+		{"exclude miss", RegionFilter{Exclude: []string{"86"}}, "+15551234567", true},
+		{"include+exclude both hit → reject", RegionFilter{Include: []string{"86"}, Exclude: []string{"86"}}, "+8613800138000", false},
+		{"00 prefix recognized", RegionFilter{Include: []string{"86"}}, "008613800138000", true},
+		{"no + or 00 still works", RegionFilter{Include: []string{"86"}}, "8613800138000", true},
+		{"longer prefix selectivity", RegionFilter{Include: []string{"852"}}, "+85298765432", true},
+		{"longer prefix not matching shorter", RegionFilter{Include: []string{"852"}}, "+8613800138000", false},
+		{"empty prefix in list ignored", RegionFilter{Include: []string{"", "86"}}, "+15551234567", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

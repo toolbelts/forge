@@ -25,26 +25,26 @@ type SmsMessage struct {
 	Params     map[string]any // template mode 参数
 }
 
-// smsMode 描述一个 sms sender 支持的发送模式。
-type smsMode uint8
+// SmsMode 描述一个 sms sender 支持的发送模式。
+type SmsMode uint8
 
 const (
-	smsModeRaw      smsMode = iota + 1 // 仅支持直发内容
-	smsModeTemplate                    // 仅支持模板 ID
-	smsModeBoth                        // 都支持(后续可由 sender 升级)
+	SmsModeRaw      SmsMode = iota + 1 // 仅支持直发内容
+	SmsModeTemplate                    // 仅支持模板 ID
+	SmsModeBoth                        // 都支持(后续可由 sender 升级)
 )
 
-// smsSender 是单个短信后端的发送接口。
-type smsSender interface {
+// SmsSender 是单个短信后端的发送接口。
+type SmsSender interface {
 	Send(ctx context.Context, msg SmsMessage) error
-	Mode() smsMode
+	Mode() SmsMode
 	Name() string // 用于日志/错误标识,如 "twilio:primary"
 	// Accepts 判断 sender 是否愿意承接给定号码,主要按区号(国家码)前缀筛选。
-	// 实现一般通过嵌入 regionFilter 自动获得;未配置 include/exclude 时一律返回 true。
+	// 实现一般通过嵌入 RegionFilter 自动获得;未配置 include/exclude 时一律返回 true。
 	Accepts(to string) bool
 }
 
-// regionFilter 给 sms sender 提供区号(国家码)前缀级别的可发送筛选。
+// RegionFilter 给 sms sender 提供区号(国家码)前缀级别的可发送筛选。
 //
 // 语义:
 //   - Include 非空:号码必须命中 Include 中的某个前缀,才有可能被发送。
@@ -54,13 +54,13 @@ type smsSender interface {
 // 前缀直接和号码的「数字部分」做 strings.HasPrefix 比较。号码会先剥离
 // 头部的 '+' 或 '00' 国际拨号前缀,再做匹配,因此 yaml 里写 "86" 即可匹配
 // "+8613800138000"、"008613800138000"、"8613800138000" 这三种常见写法。
-type regionFilter struct {
+type RegionFilter struct {
 	Include []string
 	Exclude []string
 }
 
-// Accepts 实现 smsSender.Accepts,通过结构体嵌入即可让具体 sender 自动获得。
-func (r regionFilter) Accepts(to string) bool {
+// Accepts 实现 SmsSender.Accepts,通过结构体嵌入即可让具体 sender 自动获得。
+func (r RegionFilter) Accepts(to string) bool {
 	digits := stripPhonePrefix(to)
 	if len(r.Include) > 0 && !regionPrefixMatch(digits, r.Include) {
 		return false
@@ -102,18 +102,18 @@ func regionPrefixMatch(digits string, prefixes []string) bool {
 // inferMode 根据消息字段判断需要哪种 mode。
 // TemplateId 优先(template 比 raw 信息更明确),其次 Content。
 // 两者都空返回 ok=false。
-func (msg SmsMessage) inferMode() (smsMode, bool) {
+func (msg SmsMessage) inferMode() (SmsMode, bool) {
 	switch {
 	case msg.TemplateId != "":
-		return smsModeTemplate, true
+		return SmsModeTemplate, true
 	case msg.Content != "":
-		return smsModeRaw, true
+		return SmsModeRaw, true
 	default:
 		return 0, false
 	}
 }
 
 // supports 判断 sender 的 Mode 能否覆盖请求的 mode。
-func (have smsMode) supports(need smsMode) bool {
-	return have == need || have == smsModeBoth
+func (have SmsMode) supports(need SmsMode) bool {
+	return have == need || have == SmsModeBoth
 }

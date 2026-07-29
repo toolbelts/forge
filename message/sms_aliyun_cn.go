@@ -29,16 +29,16 @@ const (
 	aliyunCnSmsBizCodeOk      = "OK"
 )
 
-// aliyunCnSmsSender 是 smsSender 的 Aliyun 国内实现(template mode)。
+// aliyunCnSmsSender 是 SmsSender 的 Aliyun 国内实现(template mode)。
 type aliyunCnSmsSender struct {
-	regionFilter
+	RegionFilter
 	cfg     AliyunCnSmsConfig
 	baseURL string
 	client  *resty.Client
 }
 
 // build 让 AliyunCnSmsConfig 实现 smsSpec 接口。
-func (c AliyunCnSmsConfig) build() (smsSender, error) {
+func (c AliyunCnSmsConfig) build() (SmsSender, error) {
 	return newAliyunCnSmsSender(c)
 }
 
@@ -56,14 +56,14 @@ func newAliyunCnSmsSender(cfg AliyunCnSmsConfig) (*aliyunCnSmsSender, error) {
 	}
 	client := resty.New().SetTimeout(pickTimeout(cfg.Timeout))
 	return &aliyunCnSmsSender{
-		regionFilter: regionFilter{Include: include, Exclude: cfg.ExcludeRegions},
+		RegionFilter: RegionFilter{Include: include, Exclude: cfg.ExcludeRegions},
 		cfg:          cfg,
 		baseURL:      strings.TrimRight(endpoint, "/"),
 		client:       client,
 	}, nil
 }
 
-func (a *aliyunCnSmsSender) Mode() smsMode { return smsModeTemplate }
+func (a *aliyunCnSmsSender) Mode() SmsMode { return SmsModeTemplate }
 
 func (a *aliyunCnSmsSender) Name() string {
 	if a.cfg.Name == "" {

@@ -109,7 +109,7 @@ func TestTwilio_PropagatesHttpError(t *testing.T) {
 
 func TestTwilio_Mode(t *testing.T) {
 	s := newTwilioTestSender(t, "http://x")
-	if s.Mode() != smsModeRaw {
+	if s.Mode() != SmsModeRaw {
 		t.Fatalf("twilio should be raw mode, got %v", s.Mode())
 	}
 	if !strings.HasPrefix(s.Name(), "twilio:") {

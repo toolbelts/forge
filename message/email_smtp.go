@@ -7,18 +7,18 @@ import (
 	"github.com/wneessen/go-mail"
 )
 
-// smtpSender 是 emailSender 的 SMTP 实现,基于 wneessen/go-mail。
+// smtpSender 是 EmailSender 的 SMTP 实现,基于 wneessen/go-mail。
 //
 // 一个 smtpSender 绑定一组 SMTP 凭证 + 默认 From 地址,
 // 每次 Send 都新建一个 *mail.Client,内部 DialAndSendWithContext 完整 connect→send→quit。
 // 此模式简单、并发安全、易于按 ctx 取消;牺牲连接复用,但 SMTP 中继本身吞吐有限,可接受。
 type smtpSender struct {
-	domainFilter
+	DomainFilter
 	cfg SmtpConfig
 }
 
 // build 让 SmtpConfig 实现 emailSpec 接口。
-func (c SmtpConfig) build() (emailSender, error) {
+func (c SmtpConfig) build() (EmailSender, error) {
 	return newSmtpSender(c)
 }
 
@@ -27,7 +27,7 @@ func newSmtpSender(cfg SmtpConfig) (*smtpSender, error) {
 		return nil, fmt.Errorf("message: smtp %q missing host/port/from", cfg.Name)
 	}
 	return &smtpSender{
-		domainFilter: domainFilter{Include: cfg.IncludeDomains, Exclude: cfg.ExcludeDomains},
+		DomainFilter: DomainFilter{Include: cfg.IncludeDomains, Exclude: cfg.ExcludeDomains},
 		cfg:          cfg,
 	}, nil
 }

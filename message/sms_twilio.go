@@ -10,18 +10,18 @@ import (
 // twilioBaseURL 是 Twilio Messages API 的默认根地址,测试可改成 httptest.Server URL。
 const twilioBaseURL = "https://api.twilio.com"
 
-// twilioSender 是 smsSender 的 Twilio 实现(raw mode)。
+// twilioSender 是 SmsSender 的 Twilio 实现(raw mode)。
 //
 // 单条 SmsMessage 只承载一个 To,Twilio Messages API 也是一次一号,直接 POST 一次。
 type twilioSender struct {
-	regionFilter
+	RegionFilter
 	cfg     TwilioConfig
 	baseURL string
 	client  *resty.Client
 }
 
 // build 让 TwilioConfig 实现 smsSpec 接口。
-func (c TwilioConfig) build() (smsSender, error) {
+func (c TwilioConfig) build() (SmsSender, error) {
 	return newTwilioSender(c)
 }
 
@@ -31,14 +31,14 @@ func newTwilioSender(cfg TwilioConfig) (*twilioSender, error) {
 	}
 	client := resty.New().SetTimeout(pickTimeout(cfg.Timeout))
 	return &twilioSender{
-		regionFilter: regionFilter{Include: cfg.IncludeRegions, Exclude: cfg.ExcludeRegions},
+		RegionFilter: RegionFilter{Include: cfg.IncludeRegions, Exclude: cfg.ExcludeRegions},
 		cfg:          cfg,
 		baseURL:      twilioBaseURL,
 		client:       client,
 	}, nil
 }
 
-func (t *twilioSender) Mode() smsMode { return smsModeRaw }
+func (t *twilioSender) Mode() SmsMode { return SmsModeRaw }
 
 func (t *twilioSender) Name() string {
 	if t.cfg.Name == "" {

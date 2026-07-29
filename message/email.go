@@ -28,19 +28,19 @@ type EmailMessage struct {
 	Params     map[string]any    // template mode：模板渲染参数
 }
 
-// emailSender 是单个邮件后端的发送接口。
+// EmailSender 是单个邮件后端的发送接口。
 // 实现:smtpSender(任意 SMTP 中继)、sendGridSender(SendGrid HTTP API)。
-type emailSender interface {
+type EmailSender interface {
 	Send(ctx context.Context, msg EmailMessage) error
 	Name() string // 用于日志,如 "smtp:aws-ses" / "sendgrid:default"
 	// Accepts 判断 sender 是否愿意承接给定收件人,主要按域名后缀筛选。
-	// 实现一般通过嵌入 domainFilter 自动获得;未配置 include/exclude 时一律返回 true。
+	// 实现一般通过嵌入 DomainFilter 自动获得;未配置 include/exclude 时一律返回 true。
 	Accepts(addr string) bool
 }
 
-// domainFilter 给 email sender 提供邮件域名后缀级别的可发送筛选。
+// DomainFilter 给 email sender 提供邮件域名后缀级别的可发送筛选。
 //
-// 语义(与 sms.regionFilter 完全平行,只是匹配函数从 HasPrefix 换成 HasSuffix):
+// 语义(与 sms.RegionFilter 完全平行,只是匹配函数从 HasPrefix 换成 HasSuffix):
 //   - Include 非空:地址的域名必须命中 Include 中某个后缀,才有可能被发送。
 //   - Exclude 非空:域名命中任一后缀立即拒绝(优先级高于 Include 命中)。
 //   - 两者皆空:任何地址都接受,等同于不筛选。
@@ -48,13 +48,13 @@ type emailSender interface {
 // 后缀对地址 `@` 之后的域名做 strings.HasSuffix(大小写不敏感),因此 yaml 里写 ".cn" 可
 // 命中 "a@example.cn" / "b@my.com.cn",写 "gmail.com" 只命中 @gmail.com 子集。无 `@`
 // 的异常输入会原样作为域名参与比较(走默认匹配语义)。
-type domainFilter struct {
+type DomainFilter struct {
 	Include []string
 	Exclude []string
 }
 
-// Accepts 实现 emailSender.Accepts,通过结构体嵌入即可让具体 sender 自动获得。
-func (d domainFilter) Accepts(addr string) bool {
+// Accepts 实现 EmailSender.Accepts,通过结构体嵌入即可让具体 sender 自动获得。
+func (d DomainFilter) Accepts(addr string) bool {
 	domain := extractEmailDomain(addr)
 	if len(d.Include) > 0 && !domainSuffixMatch(domain, d.Include) {
 		return false

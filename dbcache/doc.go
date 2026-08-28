@@ -9,9 +9,10 @@
 //
 // 后端三选一:
 //   - NewMemoryStore(size):进程内 LRU,基于 hashicorp/golang-lru/v2/expirable。
-//   - NewRedisStore(client):跨实例共享,基于 go-redis/v9。
+//   - NewRedisStore(client):跨实例共享,基于 go-redis/v9;可用
+//     WithRedisInvalidation(channel) 在 Delete 后广播逻辑 key。
 //   - NewTieredStore(l1, l2):L1 + L2 组合,Get 走 L1 → L2 回填 L1;
-//     不做跨进程广播,其它实例 L1 靠 TTL 自然收敛。
+//     当 Redis L2 开启失效广播时自动订阅,收到其它实例通知后清理本进程 L1。
 //
 // 错误语义:
 //   - Loader 在数据源不存在该 key 时应返回 dbcache.ErrNotFound;
@@ -24,8 +25,8 @@
 //   - 业务侧失效仍在 model 的 AfterUpdate/AfterDelete hook 里调 cache.Delete,
 //     bun hook 是 model 上的方法,本包无法非侵入挂载。
 //
-// 多实例提示:本包不实装跨进程失效广播。Set/Delete 只影响本进程 + 共享 Store(L2);
-// 其它进程的 L1 通过 TTL 自然过期。需要严格一致时另行加 Invalidator 扩展。
+// 多实例提示:Redis Pub/Sub 失效广播默认关闭且是 best-effort 语义;
+// 断线期间的消息不会补发,其它进程的 L1 仍通过 TTL 最终收敛,不提供严格一致性。
 //
 // 可观测性(OTel,默认 noop,显式接入):
 //   - dbcache.New 默认装 NoopMetrics{} 与 NoopTracer(),不上报任何数据。

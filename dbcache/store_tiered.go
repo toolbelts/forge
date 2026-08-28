@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -17,11 +18,14 @@ import (
 //   - Delete: 同时清 l1 + l2,任一错聚合返回。
 //   - MGet/MSet: 同样的"l1 优先,l2 补漏"思路,只对 l1 漏的 key 去 l2 拉。
 //
-// 注意:不做跨进程广播 —— 其它进程的 l1 通过 TTL 自然收敛,
-// l2 是共享的,所以其它进程下次访问 l2 会拿到新值或感知缺失。
+// l2 若是通过 WithRedisInvalidation 开启通知的 Redis Store,
+// NewTieredStore 会自动订阅并在收到其它实例的删除消息后清理本进程 l1。
 type tieredStore struct {
-	l1 Store
-	l2 Store
+	l1               Store
+	l2               Store
+	stopInvalidation func() error
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 // NewTieredStore 组合两层 Store。任一为 nil 直接 panic(配置错误)。
@@ -29,7 +33,15 @@ func NewTieredStore(l1, l2 Store) Store {
 	if l1 == nil || l2 == nil {
 		panic("dbcache: NewTieredStore: nil l1 or l2")
 	}
-	return &tieredStore{l1: l1, l2: l2}
+	s := &tieredStore{l1: l1, l2: l2}
+	if source, ok := l2.(interface {
+		subscribeInvalidation(func(context.Context, []string) error) func() error
+	}); ok {
+		s.stopInvalidation = source.subscribeInvalidation(func(ctx context.Context, keys []string) error {
+			return s.l1.Delete(ctx, keys...)
+		})
+	}
+	return s
 }
 
 // Get 先 l1 后 l2,l2 命中后回填 l1(用透传的 ttl 不可知,这里用一个保守的较短 ttl,
@@ -123,7 +135,15 @@ func (s *tieredStore) MSet(ctx context.Context, items map[string]Item, ttl time.
 	return nil
 }
 
-// Close 关闭两层(顺序无关紧要)。
+// Close 先停失效订阅并等待接收协程退出,再关闭两层。
+// closeOnce 保证 PubSub 与底层 Store 都只关闭一次。
 func (s *tieredStore) Close() error {
-	return errors.Join(s.l1.Close(), s.l2.Close())
+	s.closeOnce.Do(func() {
+		var stopErr error
+		if s.stopInvalidation != nil {
+			stopErr = s.stopInvalidation()
+		}
+		s.closeErr = errors.Join(stopErr, s.l1.Close(), s.l2.Close())
+	})
+	return s.closeErr
 }

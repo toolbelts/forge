@@ -2,10 +2,16 @@ package dbcache
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"github.com/rs/zerolog/log"
 )
 
 // 协议头第一字节用于区分负缓存和正常字节。
@@ -13,12 +19,24 @@ import (
 const (
 	redisFlagValue    byte = 0x00
 	redisFlagNotFound byte = 0x01
+
+	redisInvalidationVersion = 1
 )
+
+// redisInvalidationMessage 是 Redis Pub/Sub 上传输的失效协议。
+// Keys 保留调用 Store.Delete 时的逻辑 key,订阅端可直接用它清理自己的 L1。
+type redisInvalidationMessage struct {
+	Version int      `json:"version"`
+	Source  string   `json:"source"`
+	Keys    []string `json:"keys"`
+}
 
 // redisStore 基于 go-redis 的 Store 实现。Codec 在 Cache 层,Store 只搬字节。
 type redisStore struct {
-	client    redis.UniversalClient
-	keyPrefix string
+	client              redis.UniversalClient
+	keyPrefix           string
+	invalidationChannel string
+	instanceId          string
 }
 
 // RedisOption 调整 redisStore 行为。
@@ -29,6 +47,22 @@ type RedisOption func(*redisStore)
 func WithRedisKeyPrefix(prefix string) RedisOption {
 	return func(s *redisStore) {
 		s.keyPrefix = prefix
+	}
+}
+
+// WithRedisInvalidation 开启基于 Redis Pub/Sub 的删除广播。
+// channel 必须在同一逻辑缓存的所有进程中保持一致;空白 channel 属于配置错误并 panic。
+//
+// Redis Pub/Sub 是 best-effort 通知:订阅端断线期间的消息不会补发,
+// tiered Store 仍靠 L1 TTL 作为最终收敛兜底。
+func WithRedisInvalidation(channel string) RedisOption {
+	return func(s *redisStore) {
+		channel = strings.TrimSpace(channel)
+		if channel == "" {
+			panic("dbcache: WithRedisInvalidation: empty channel")
+		}
+		s.invalidationChannel = channel
+		s.instanceId = uuid.NewString()
 	}
 }
 
@@ -88,7 +122,10 @@ func (s *redisStore) Delete(ctx context.Context, keys ...string) error {
 	for i, k := range keys {
 		full[i] = s.k(k)
 	}
-	return s.client.Del(ctx, full...).Err()
+	if err := s.client.Del(ctx, full...).Err(); err != nil {
+		return err
+	}
+	return s.publishInvalidation(ctx, keys)
 }
 
 // MGet 用 Pipeline 一次拿多条。未命中的 key 不出现在结果 map 中。
@@ -142,6 +179,78 @@ func (s *redisStore) MSet(ctx context.Context, items map[string]Item, ttl time.D
 // Close redis 客户端的生命周期由 provider 管理,这里不主动 Close。
 func (s *redisStore) Close() error {
 	return nil
+}
+
+// publishInvalidation 在 L2 删除成功后广播逻辑 key。发布失败返回给调用方,
+// 这样上层可以重试 Delete;没有订阅者不是错误,Redis Publish 仍返回 nil。
+func (s *redisStore) publishInvalidation(ctx context.Context, keys []string) error {
+	if s.invalidationChannel == "" || len(keys) == 0 {
+		return nil
+	}
+	payload, err := json.Marshal(redisInvalidationMessage{
+		Version: redisInvalidationVersion,
+		Source:  s.instanceId,
+		Keys:    keys,
+	})
+	if err != nil {
+		return fmt.Errorf("dbcache: marshal invalidation: %w", err)
+	}
+	if err := s.client.Publish(ctx, s.invalidationChannel, payload).Err(); err != nil {
+		return fmt.Errorf("dbcache: publish invalidation: %w", err)
+	}
+	return nil
+}
+
+// subscribeInvalidation 为一个 TieredStore 建立独立订阅并返回幂等停止函数。
+// 未开启失效广播时返回 nil,让 NewTieredStore 保持原有零后台协程行为。
+func (s *redisStore) subscribeInvalidation(handler func(context.Context, []string) error) func() error {
+	if s.invalidationChannel == "" || handler == nil {
+		return nil
+	}
+
+	pubsub := s.client.Subscribe(context.Background(), s.invalidationChannel)
+	messages := pubsub.Channel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for msg := range messages {
+			var event redisInvalidationMessage
+			if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
+				log.Warn().Err(err).
+					Str("channel", s.invalidationChannel).
+					Msg("dbcache: ignore malformed invalidation message")
+				continue
+			}
+			if event.Version != redisInvalidationVersion || event.Source == "" || len(event.Keys) == 0 {
+				log.Warn().
+					Str("channel", s.invalidationChannel).
+					Int("version", event.Version).
+					Msg("dbcache: ignore invalid invalidation message")
+				continue
+			}
+			if event.Source == s.instanceId {
+				continue
+			}
+			if err := handler(context.Background(), event.Keys); err != nil {
+				log.Error().Err(err).
+					Str("channel", s.invalidationChannel).
+					Int("keys", len(event.Keys)).
+					Msg("dbcache: invalidate local cache failed")
+			}
+		}
+	}()
+
+	var (
+		once    sync.Once
+		stopErr error
+	)
+	return func() error {
+		once.Do(func() {
+			stopErr = pubsub.Close()
+			<-done
+		})
+		return stopErr
+	}
 }
 
 // encodeRedisPayload 把 Item 编为单条字节:首字节为标志位,余下为 Value。

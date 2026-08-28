@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
@@ -89,24 +90,42 @@ func buildDbcacheStore(ctx context.Context, v *viper.Viper, prefix, storeType st
 		return dbcache.NewMemoryStore(v.GetInt(prefix + ".size")), nil
 
 	case "redis":
-		client, keyPrefix, err := resolveDbcacheRedis(ctx, v, prefix)
+		store, err := buildDbcacheRedisStore(ctx, v, prefix)
 		if err != nil {
 			return nil, err
 		}
-		return dbcache.NewRedisStore(client, dbcache.WithRedisKeyPrefix(keyPrefix)), nil
+		return store, nil
 
 	case "tiered":
-		client, keyPrefix, err := resolveDbcacheRedis(ctx, v, prefix)
+		l2, err := buildDbcacheRedisStore(ctx, v, prefix)
 		if err != nil {
 			return nil, err
 		}
 		l1 := dbcache.NewMemoryStore(v.GetInt(prefix + ".size"))
-		l2 := dbcache.NewRedisStore(client, dbcache.WithRedisKeyPrefix(keyPrefix))
 		return dbcache.NewTieredStore(l1, l2), nil
 
 	default:
 		return nil, fmt.Errorf("unknown store type %q", storeType)
 	}
+}
+
+// buildDbcacheRedisStore 构造 redis/tiered 共用的 Redis L2。
+// 失效通知默认关闭;开启但未给 channel 时按 cache name 生成稳定默认值。
+func buildDbcacheRedisStore(ctx context.Context, v *viper.Viper, prefix string) (dbcache.Store, error) {
+	client, keyPrefix, err := resolveDbcacheRedis(ctx, v, prefix)
+	if err != nil {
+		return nil, err
+	}
+	opts := []dbcache.RedisOption{dbcache.WithRedisKeyPrefix(keyPrefix)}
+	if v.GetBool(prefix + ".invalidation.enabled") {
+		channel := strings.TrimSpace(v.GetString(prefix + ".invalidation.channel"))
+		if channel == "" {
+			name := strings.TrimPrefix(prefix, "dbcache.")
+			channel = "dbcache:" + name + ":invalidate"
+		}
+		opts = append(opts, dbcache.WithRedisInvalidation(channel))
+	}
+	return dbcache.NewRedisStore(client, opts...), nil
 }
 
 // resolveDbcacheRedis 抽出 redis/tiered 共用的"按 redis 名取 client + 读 key_prefix"逻辑。

@@ -2,10 +2,13 @@ package dbcache
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
 )
 
 // stubStore 是测试用 Store,允许注入错误和观察调用次数。
@@ -215,4 +218,130 @@ func TestTieredStore_NilPanics(t *testing.T) {
 		}
 	}()
 	NewTieredStore(nil, newStubStore())
+}
+
+func TestTieredStore_RedisInvalidationClearsRemoteL1(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mr := miniredis.RunT(t)
+	clientA := newTestRedisClient(t, mr.Addr())
+	clientB := newTestRedisClient(t, mr.Addr())
+	const channel = "dbcache:users:invalidate"
+
+	l1A := NewMemoryStore(10)
+	l1B := NewMemoryStore(10)
+	tierA := NewTieredStore(l1A, NewRedisStore(clientA, WithRedisInvalidation(channel)))
+	tierB := NewTieredStore(l1B, NewRedisStore(clientB, WithRedisInvalidation(channel)))
+	t.Cleanup(func() {
+		_ = tierA.Close()
+		_ = tierB.Close()
+	})
+	waitForRedisSubscribers(t, clientA, channel, 2)
+
+	items := map[string]Item{
+		"a": {Value: []byte("1")},
+		"b": {Value: []byte("2")},
+	}
+	if err := tierB.MSet(ctx, items, time.Minute); err != nil {
+		t.Fatalf("prime B: %v", err)
+	}
+	if err := tierA.Delete(ctx, "a", "b"); err != nil {
+		t.Fatalf("delete A: %v", err)
+	}
+
+	waitForStoreMiss(t, l1B, "a", "b")
+	if got, err := tierB.MGet(ctx, []string{"a", "b"}); err != nil || len(got) != 0 {
+		t.Fatalf("B should miss both L1 and L2 after invalidation, got=%v err=%v", got, err)
+	}
+}
+
+func TestTieredStore_InvalidationIgnoresSelfAndMalformedMessages(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	mr := miniredis.RunT(t)
+	client := newTestRedisClient(t, mr.Addr())
+	const channel = "dbcache:self:invalidate"
+
+	l1 := NewMemoryStore(10)
+	l2 := NewRedisStore(client, WithRedisInvalidation(channel))
+	tier := NewTieredStore(l1, l2)
+	t.Cleanup(func() { _ = tier.Close() })
+	waitForRedisSubscribers(t, client, channel, 1)
+
+	if err := tier.MSet(ctx, map[string]Item{
+		"self":  {Value: []byte("keep")},
+		"other": {Value: []byte("drop")},
+	}, time.Minute); err != nil {
+		t.Fatalf("prime: %v", err)
+	}
+	if err := client.Publish(ctx, channel, "not-json").Err(); err != nil {
+		t.Fatalf("publish malformed: %v", err)
+	}
+	selfPayload, _ := json.Marshal(redisInvalidationMessage{
+		Version: redisInvalidationVersion,
+		Source:  l2.(*redisStore).instanceId,
+		Keys:    []string{"self"},
+	})
+	if err := client.Publish(ctx, channel, selfPayload).Err(); err != nil {
+		t.Fatalf("publish self: %v", err)
+	}
+	otherPayload, _ := json.Marshal(redisInvalidationMessage{
+		Version: redisInvalidationVersion,
+		Source:  "another-process",
+		Keys:    []string{"other"},
+	})
+	if err := client.Publish(ctx, channel, otherPayload).Err(); err != nil {
+		t.Fatalf("publish other: %v", err)
+	}
+
+	waitForStoreMiss(t, l1, "other")
+	if item, hit, err := l1.Get(ctx, "self"); err != nil || !hit || string(item.Value) != "keep" {
+		t.Fatalf("self invalidation should be ignored: hit=%v item=%+v err=%v", hit, item, err)
+	}
+}
+
+func TestTieredStore_CloseStopsInvalidationSubscriber(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	client := newTestRedisClient(t, mr.Addr())
+	const channel = "dbcache:close:invalidate"
+
+	tier := NewTieredStore(
+		NewMemoryStore(10),
+		NewRedisStore(client, WithRedisInvalidation(channel)),
+	)
+	waitForRedisSubscribers(t, client, channel, 1)
+	if err := tier.Close(); err != nil {
+		t.Fatalf("first close: %v", err)
+	}
+	if err := tier.Close(); err != nil {
+		t.Fatalf("second close: %v", err)
+	}
+	waitForRedisSubscribers(t, client, channel, 0)
+}
+
+func waitForStoreMiss(t *testing.T, store Store, keys ...string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for {
+		allMissing := true
+		for _, key := range keys {
+			_, hit, err := store.Get(ctx, key)
+			if err != nil {
+				t.Fatalf("get %q: %v", key, err)
+			}
+			if hit {
+				allMissing = false
+			}
+		}
+		if allMissing {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("wait for local invalidation timed out: keys=%v", keys)
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
 }

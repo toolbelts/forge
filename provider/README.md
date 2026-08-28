@@ -449,10 +449,23 @@ ReliableQueue 是至少一次投递:崩溃和副本确认超时可能导致重�
 | `size` | int | `100000` | LRU 容量上限,`memory` / `tiered` 用 |
 | `redis` | string | `default` | redis 实例名,`redis` / `tiered` 用 |
 | `key_prefix` | string | — | Redis key 前缀,`redis` / `tiered` 用,多 cache 共享同一 Redis 时务必区分 |
+| `invalidation.enabled` | bool | `false` | 开启 Redis Pub/Sub 删除广播,`redis` / `tiered` 用 |
+| `invalidation.channel` | string | `dbcache:<name>:invalidate` | 同一逻辑缓存的所有进程必须一致 |
 
-`memory` 后端无外部依赖,`Shutdown` 时 `Purge` 清空 LRU;`redis` / `tiered` 的 Redis 客户端由 `RedisProvider` 统一管理,Dbcache 的 `Shutdown` 不再 Close redis client。
+`memory` 后端无外部依赖,`Shutdown` 时 `Purge` 清空 LRU;`redis` / `tiered` 的 Redis 客户端由 `RedisProvider` 统一管理,Dbcache 的 `Shutdown` 不再 Close redis client。`tiered` 开启失效通知时,Shutdown 会先停止订阅协程再清理 L1/L2。
 
-> **失效**:dbcache 不实装跨进程广播,多实例下 L1 靠 TTL 自然收敛。业务方写后失效仍由自家 model 的 bun `AfterUpdate/AfterDelete` hook 调 `cache.Delete`。
+> **失效**:业务方写后失效仍由自家 model 的 bun `AfterUpdate/AfterDelete` hook 调 `cache.Delete`。开启通知后,Redis Store 在 L2 删除成功后发布逻辑 key;其它 `tiered` 实例收到消息只清自己的 L1。纯 `redis` 后端没有 L1,但可作为发布者兼容混合部署。Redis Pub/Sub 是低延迟、best-effort 通知,断线期间不补发,现有 L1 TTL 继续作为最终收敛兜底;它不提供严格一致性。同一缓存的所有进程必须使用相同 Redis、`key_prefix` 与通知频道。
+
+```yaml
+dbcache:
+  users:
+    store: tiered
+    redis: default
+    key_prefix: "app:users:"
+    invalidation:
+      enabled: true
+      channel: "app:dbcache:users:invalidate"
+```
 
 **可观测性(默认 noop,显式接入 OTel)**:业务在 `dbcache.New` 时显式 `dbcache.WithMetrics(dbcache.NewOTelMetrics())` 和/或 `dbcache.WithTracer(dbcache.NewOTelTracer())` 才会上报。两个工厂内部走全局 `otel.MeterProvider` / `otel.TracerProvider`,与 `metrics.enabled` / `trace.enabled` 联动 —— 未启用时是 noop。Provider 的 `trace.instrumentation.*` / `metrics.instrumentation.*` 只控制自动挂载的 Provider hook,不控制这种业务显式接入。
 

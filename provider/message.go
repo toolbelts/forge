@@ -134,13 +134,17 @@ func (p *MessageProvider) Setup(ctx context.Context) error {
 
 // buildEmailOpts 把 message.email.providers + templates 转成 Options。
 func buildEmailOpts(v *viper.Viper) ([]message.Option, error) {
-	var entries []emailProviderYaml
-	if err := v.UnmarshalKey("message.email.providers", &entries); err != nil {
-		return nil, fmt.Errorf("provider/message: parse email providers: %w", err)
+	raws, err := rawEntries(v, "message.email.providers")
+	if err != nil {
+		return nil, err
 	}
 
-	opts := make([]message.Option, 0, len(entries))
-	for _, e := range entries {
+	opts := make([]message.Option, 0, len(raws))
+	for i, raw := range raws {
+		var e emailProviderYaml
+		if err := decodeEntry(raw, &e); err != nil {
+			return nil, fmt.Errorf("provider/message: email providers[%d]: %w", i, err)
+		}
 		switch e.Type {
 		case "smtp":
 			opts = append(opts, message.WithSmtp(message.SmtpConfig{
@@ -167,7 +171,20 @@ func buildEmailOpts(v *viper.Viper) ([]message.Option, error) {
 				ExcludeDomains: e.ExcludeDomains,
 			}))
 		default:
-			return nil, fmt.Errorf("provider/message: unknown email provider type %q (name=%q)", e.Type, e.Name)
+			// 内置认不出来就查注册表（message_registry.go）：业务自己实现的后端走这里。
+			f, ok := lookupEmailFactory(e.Type)
+			if !ok {
+				return nil, fmt.Errorf("provider/message: unknown email provider type %q (name=%q); built-in: %v; registered: %v",
+					e.Type, e.Name, builtinEmailTypes, registeredEmailTypes())
+			}
+			sender, err := f(EmailProviderConfig{
+				Type: e.Type, Name: e.Name, From: e.From, FromName: e.FromName, Timeout: e.Timeout,
+				IncludeDomains: e.IncludeDomains, ExcludeDomains: e.ExcludeDomains, Raw: raw,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("provider/message: build email %q (type=%s): %w", e.Name, e.Type, err)
+			}
+			opts = append(opts, message.WithEmailSender(sender))
 		}
 	}
 
@@ -211,13 +228,17 @@ func buildEmailTemplateOpts(v *viper.Viper) ([]message.Option, error) {
 
 // buildSmsOpts 把 message.sms.providers 转成 Options。
 func buildSmsOpts(v *viper.Viper) ([]message.Option, error) {
-	var entries []smsProviderYaml
-	if err := v.UnmarshalKey("message.sms.providers", &entries); err != nil {
-		return nil, fmt.Errorf("provider/message: parse sms providers: %w", err)
+	raws, err := rawEntries(v, "message.sms.providers")
+	if err != nil {
+		return nil, err
 	}
 
-	opts := make([]message.Option, 0, len(entries))
-	for _, e := range entries {
+	opts := make([]message.Option, 0, len(raws))
+	for i, raw := range raws {
+		var e smsProviderYaml
+		if err := decodeEntry(raw, &e); err != nil {
+			return nil, fmt.Errorf("provider/message: sms providers[%d]: %w", i, err)
+		}
 		switch e.Type {
 		case "twilio":
 			opts = append(opts, message.WithTwilioSms(message.TwilioConfig{
@@ -263,7 +284,20 @@ func buildSmsOpts(v *viper.Viper) ([]message.Option, error) {
 				ExcludeRegions: e.ExcludeRegions,
 			}))
 		default:
-			return nil, fmt.Errorf("provider/message: unknown sms provider type %q (name=%q)", e.Type, e.Name)
+			// 内置认不出来就查注册表（message_registry.go）：业务自己实现的后端走这里。
+			f, ok := lookupSmsFactory(e.Type)
+			if !ok {
+				return nil, fmt.Errorf("provider/message: unknown sms provider type %q (name=%q); built-in: %v; registered: %v",
+					e.Type, e.Name, builtinSmsTypes, registeredSmsTypes())
+			}
+			sender, err := f(SmsProviderConfig{
+				Type: e.Type, Name: e.Name, Timeout: e.Timeout,
+				IncludeRegions: e.IncludeRegions, ExcludeRegions: e.ExcludeRegions, Raw: raw,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("provider/message: build sms %q (type=%s): %w", e.Name, e.Type, err)
+			}
+			opts = append(opts, message.WithSmsSender(sender))
 		}
 	}
 	return opts, nil

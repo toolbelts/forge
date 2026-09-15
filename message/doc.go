@@ -10,4 +10,16 @@
 //
 // 邮件模板:程序启动期把 (subject, html, text) 解析为 *template.Template,
 // 运行期按 id 渲染,html 部分用 html/template 自动转义防 XSS。
+//
+// # 自定义后端
+//
+// 内置类型之外的后端(WhatsApp、某家区域短信商……)由业务仓库自己实现
+// SmsSender / EmailSender,两条路都可以:
+//
+//	message.New(..., message.WithSmsSender(mySender))        // 自己建 Manager
+//	provider.RegisterSmsSender("whatsapp", myFactory)        // 走 yaml 的 providers[]
+//
+// 后者让自定义后端和内置的用同一套配置形状(顺序即 fallback 优先级、区号筛选、
+// 超时),forge 不需要认识任何具体供应商。注册时机见 provider/message_registry.go
+// 的包注释:必须早于 MessageProvider.Setup,也就是业务 Provider 的 Register 阶段。
 package message

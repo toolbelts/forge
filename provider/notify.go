@@ -41,11 +41,20 @@ type NotifyProvider struct {
 // Register 读取 viper 配置创建 notifier 并注入容器。无任何渠道配置时使用 noop 实现。
 func (p *NotifyProvider) Register(ctx context.Context) error {
 	v := MustGetViper(ctx)
+	p.appName = string(MustGetAppName(ctx))
+	p.hostname, _ = os.Hostname()
+	if p.hostname == "" {
+		p.hostname = "unknown"
+	}
 
-	p.notifier = notify.New(
-		notify.WithTelegram(v.GetString("notify.telegram.token"), v.GetString("notify.telegram.chat_id")),
-		notify.WithLark(v.GetString("notify.lark.webhook")),
-	)
+	p.notifier = &appNotifier{
+		notifier: notify.New(
+			notify.WithTelegram(v.GetString("notify.telegram.token"), v.GetString("notify.telegram.chat_id")),
+			notify.WithLark(v.GetString("notify.lark.webhook")),
+		),
+		hostname: p.hostname,
+		appName:  p.appName,
+	}
 	ioc.MustInstance(ctx, p.notifier)
 
 	log.Ctx(ctx).Info().Msg("notifier initialized")
@@ -55,9 +64,21 @@ func (p *NotifyProvider) Register(ctx context.Context) error {
 // Setup 缓存生命周期通知所需依赖。
 func (p *NotifyProvider) Setup(ctx context.Context) error {
 	p.buildInfo = MustGetBuildInfo(ctx)
-	p.appName = string(MustGetAppName(ctx))
-	p.hostname, _ = os.Hostname()
 	return nil
+}
+
+// appNotifier 为所有通知标题补齐当前主机名与应用名。
+type appNotifier struct {
+	notifier notify.Notifier
+	hostname string
+	appName  string
+}
+
+// Send 保留正文与发送行为，已有当前主机名或应用名前缀时不重复添加。
+func (n *appNotifier) Send(ctx context.Context, title, content string) error {
+	title = strings.TrimPrefix(title, "["+n.hostname+"] ")
+	title = strings.TrimPrefix(title, n.appName+" ")
+	return n.notifier.Send(ctx, "["+n.hostname+"] "+n.appName+" "+title, content)
 }
 
 // Serve 在所有 Provider Setup 完成后由 ioc 调度调用：发 started 通知，阻塞到 ctx 取消。

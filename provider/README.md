@@ -212,6 +212,10 @@ trace 自动插桩配置:
 
 两个通道全空时使用 noop notifier,`MustGetNotifier` 仍可获取(返回 noop 实现,Send 直接成功)。
 
+注入容器的通知器统一将标题格式化为 `[hostname] appName 原标题`，hostname 与 AppName 在启动时读取并缓存。
+已有当前主机名前缀或应用名前缀时不重复添加，启动、停止与 panic 通知沿用现有标题。
+无法读取主机名时使用 `unknown`；正文、通道选择与发送错误保持原有行为。
+
 ### RedisProvider — `redis.<name>.*`
 
 每个 `<name>` 是一份独立的 `redis.UniversalClient`,通过 `MustGetRedis(ctx, "<name>")` 获取。约定使用 `default` 作为主实例名。Provider 当前仍按单地址配置创建 `*redis.Client`,容器只暴露接口,消费方无需依赖具体客户端类型。

@@ -2,12 +2,12 @@ package registry
 
 import (
 	"context"
+	"encoding/json/v2"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
 
-	json "github.com/goccy/go-json"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 	"google.golang.org/grpc/resolver"

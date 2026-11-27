@@ -2,9 +2,11 @@ package reliablequeue
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"fmt"
 	"maps"
+
+	"github.com/toolbelts/forge/internal/jsonopt"
 )
 
 // Message 是可靠队列传输的稳定消息信封。
@@ -15,11 +17,12 @@ type Message struct {
 }
 
 // Decode 把 Payload 解码到 target；空 target 或非法 JSON 返回错误。
+// 用 encoding/json/v2 + jsonopt.Payload 解码：time.Duration 接受 "1h30m0s" 这样的字符串（也接受旧的纳秒整数），其余为 v2 语义（字段名大小写敏感、重复键报错）。
 func (message Message) Decode(target any) error {
 	if target == nil {
 		return fmt.Errorf("%w: nil decode target", ErrInvalidMessage)
 	}
-	if err := json.Unmarshal(message.Payload, target); err != nil {
+	if err := json.Unmarshal(message.Payload, target, jsonopt.Payload); err != nil {
 		return fmt.Errorf("%w: decode payload: %v", ErrInvalidMessage, err)
 	}
 	return nil

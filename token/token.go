@@ -2,13 +2,13 @@ package token
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
 	"strconv"
 	"time"
 
-	json "github.com/goccy/go-json"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"

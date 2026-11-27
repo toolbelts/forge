@@ -3,12 +3,13 @@ package accesslog
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"math"
 	"strings"
 	"time"
 
-	json "github.com/goccy/go-json"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"go.opentelemetry.io/otel/trace"
@@ -347,7 +348,7 @@ type payloadValue struct {
 // mask(probe 预检命中才做 JSON 树往返)→ 超长截断落 text → 顶层非对象(wrapper 类型)落 text →
 // 合法 JSON 对象落 raw。
 // 先 mask 再截断,避免被截断撕裂的 JSON 前缀漏脱敏字段。
-// raw 分支给 zerolog RawJSON 用,两个前提由上游保证:protojson/goccy 会转义所有控制字符
+// raw 分支给 zerolog RawJSON 用,两个前提由上游保证:protojson / encoding/json 会转义所有控制字符
 // (输出无裸换行),无效 UTF-8 在 Marshal 时报错走占位符分支。
 func marshalPayload(v any, o *options) payloadValue {
 	if v == nil {
@@ -407,16 +408,24 @@ func addPayload(evt *zerolog.Event, jsonKey, textKey string, pv payloadValue) {
 	}
 }
 
+// 脱敏时的 JSON 选项,见 applyMask。
+var (
+	maskDecodeOptions = json.JoinOptions(jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	maskEncodeOptions = json.JoinOptions(json.Deterministic(true), jsontext.AllowInvalidUTF8(true))
+)
+
 // applyMask 对 protojson 输出做字段级脱敏:解析为通用 JSON 树,递归替换命中 mask 的 key 的 value
 // 为 "***",再重新序列化。任何 unmarshal/marshal 失败都直接返回原 buf(best-effort,不阻塞日志)。
 // 仅替换非 nil 叶子值;遇到 null 保持不动避免类型变形。
 func applyMask(buf []byte, mask map[string]struct{}) []byte {
+	// 解析失败就原样返回,等于没脱敏,所以解析要尽量宽容(v2 默认会拒绝重复键和非法 UTF-8);
+	// 输出按键排序,日志才稳定可比对。
 	var root any
-	if err := json.Unmarshal(buf, &root); err != nil {
+	if err := json.Unmarshal(buf, &root, maskDecodeOptions); err != nil {
 		return buf
 	}
 	maskWalk(root, mask)
-	out, err := json.Marshal(root)
+	out, err := json.Marshal(root, maskEncodeOptions)
 	if err != nil {
 		return buf
 	}

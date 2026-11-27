@@ -2,12 +2,13 @@ package message
 
 import (
 	"context"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"net/url"
 	"strings"
 	"time"
 
-	"github.com/goccy/go-json"
 	"resty.dev/v3"
 )
 
@@ -74,6 +75,13 @@ func (a *aliyunCnSmsSender) Name() string {
 
 // aliyunCnSmsResponse 是 SendSms 200 OK 时业务层的关键字段。
 // Code == "OK" 才是成功,其它都是业务错误(如 isv.SMS_SIGNATURE_ILLEGAL)。
+// vendorResponseOptions 解析供应商响应时放宽 json/v2 的严格默认值(字段名大小写、重复键、非法 UTF-8)。
+var vendorResponseOptions = json.JoinOptions(
+	json.MatchCaseInsensitiveNames(true),
+	jsontext.AllowDuplicateNames(true),
+	jsontext.AllowInvalidUTF8(true),
+)
+
 type aliyunCnSmsResponse struct {
 	Code      string `json:"Code"`
 	Message   string `json:"Message"`
@@ -96,7 +104,8 @@ func (a *aliyunCnSmsSender) Send(ctx context.Context, msg SmsMessage) error {
 
 	paramJson := ""
 	if len(msg.Params) > 0 {
-		buf, err := json.Marshal(msg.Params)
+		// map 的键在 v2 默认不排序;固定顺序让同一组参数总是产生同一个请求体。
+		buf, err := json.Marshal(msg.Params, json.Deterministic(true))
 		if err != nil {
 			return fmt.Errorf("message: aliyun-cn marshal params: %w", err)
 		}
@@ -143,8 +152,9 @@ func (a *aliyunCnSmsSender) Send(ctx context.Context, msg SmsMessage) error {
 	}
 
 	// 200 也可能业务失败 (Code != "OK"),不解析 body 会静默吞错。
+	// 响应是外部输入,解析要宽容:这里一旦报错,短信其实已发出,上层却会换下一个通道再发一遍。
 	var body aliyunCnSmsResponse
-	if err := json.Unmarshal(resp.Bytes(), &body); err != nil {
+	if err := json.Unmarshal(resp.Bytes(), &body, vendorResponseOptions); err != nil {
 		return fmt.Errorf("message: aliyun-cn parse response: %w (body=%s)", err, resp.String())
 	}
 	if body.Code != aliyunCnSmsBizCodeOk {

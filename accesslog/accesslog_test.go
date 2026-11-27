@@ -3,13 +3,13 @@ package accesslog
 import (
 	"bytes"
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"strings"
 	"testing"
 	"time"
 
-	json "github.com/goccy/go-json"
 	"github.com/rs/zerolog"
 	"go.opentelemetry.io/otel/trace"
 	statuspb "google.golang.org/genproto/googleapis/rpc/status"
@@ -677,8 +677,8 @@ func TestApplyMask(t *testing.T) {
 			if err := json.Unmarshal([]byte(tc.want), &wantV); err != nil {
 				t.Fatalf("unmarshal want: %v", err)
 			}
-			gotJ, _ := json.Marshal(gotV)
-			wantJ, _ := json.Marshal(wantV)
+			gotJ, _ := json.Marshal(gotV, json.Deterministic(true))
+			wantJ, _ := json.Marshal(wantV, json.Deterministic(true))
 			if string(gotJ) != string(wantJ) {
 				t.Errorf("got=%s want=%s", gotJ, wantJ)
 			}
@@ -1019,5 +1019,28 @@ func TestUnaryInterceptor_PayloadSpecialChars(t *testing.T) {
 	}
 	if m["message"] != msg {
 		t.Errorf("req.message = %q, want %q (round-trip)", m["message"], msg)
+	}
+}
+
+// TestApplyMaskOutputIsStable 验证脱敏后的输出按键排序:json/v2 默认不排序 map 的键,
+// 不固定的话同一条请求每次打出来的日志都不一样。
+func TestApplyMaskOutputIsStable(t *testing.T) {
+	mask := map[string]struct{}{"password": {}}
+	const in = `{"z":1,"profile":{"name":"x","password":"p","age":3},"a":[{"k":2,"b":1}]}`
+	const want = `{"a":[{"b":1,"k":2}],"profile":{"age":3,"name":"x","password":"***"},"z":1}`
+	for range 20 {
+		if got := string(applyMask([]byte(in), mask)); got != want {
+			t.Fatalf("got=%s want=%s", got, want)
+		}
+	}
+}
+
+// TestApplyMaskToleratesMalformedInput 验证重复键、非法 UTF-8 不会让脱敏整体失效(失效就等于原样打出明文)。
+func TestApplyMaskToleratesMalformedInput(t *testing.T) {
+	mask := map[string]struct{}{"password": {}}
+	in := []byte("{\"password\":\"p1\",\"password\":\"p2\",\"name\":\"a\xffb\"}")
+	got := string(applyMask(in, mask))
+	if strings.Contains(got, "p1") || strings.Contains(got, "p2") || !strings.Contains(got, `"password":"***"`) {
+		t.Fatalf("password not masked: %s", got)
 	}
 }

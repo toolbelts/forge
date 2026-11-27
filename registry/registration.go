@@ -2,10 +2,10 @@ package registry
 
 import (
 	"context"
+	"encoding/json/v2"
 	"fmt"
 	"time"
 
-	json "github.com/goccy/go-json"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 )

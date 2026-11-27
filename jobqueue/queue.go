@@ -2,7 +2,7 @@ package jobqueue
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"maps"
@@ -11,6 +11,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
+
+	"github.com/toolbelts/forge/internal/jsonopt"
 )
 
 const defaultKeyPrefix = "jobqueue:"
@@ -168,7 +170,8 @@ func (q *Queue) Subscribe(topic string, fn any, opts ...SubscribeOption) error {
 // payload 入内存缓冲后立即返回,达到 maxBatch 或满 window 时批量 LPUSH;
 // Redis/Lua 失败仅产生日志 + dropped 指标,进程崩溃会丢缓冲中未 flush 的消息。
 //
-// args 中的 []byte 会被 json.Marshal 编为 base64 字符串,业务方自行权衡。
+// args 用 encoding/json/v2 + jsonopt.Payload 编码:[]byte 会编为 base64 字符串(业务方自行权衡),
+// time.Duration 编为 "1h30m0s" 这样的字符串,nil 切片 / map 为 null。
 func (q *Queue) Publish(ctx context.Context, topic string, args ...any) error {
 	if topic == "" {
 		return ErrEmptyTopic
@@ -182,7 +185,7 @@ func (q *Queue) Publish(ctx context.Context, topic string, args ...any) error {
 	if args == nil {
 		args = []any{}
 	}
-	payload, err := json.Marshal(args)
+	payload, err := json.Marshal(args, jsonopt.Payload)
 	if err != nil {
 		return fmt.Errorf("jobqueue: marshal args for %q: %w", topic, err)
 	}

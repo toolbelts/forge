@@ -100,7 +100,7 @@ func WithJitter(ratio float64) Option {
 	}
 }
 
-// WithCodec 替换默认 Codec(go-json),用于 Redis 后端写入前的序列化。
+// WithCodec 替换默认 Codec(encoding/json/v2),用于 Redis 后端写入前的序列化。
 // Memory 后端不会调用 Codec。
 func WithCodec(c Codec) Option {
 	return func(o *options) {

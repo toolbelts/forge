@@ -2,7 +2,7 @@ package reliablequeue
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"time"
@@ -276,7 +276,8 @@ func decodeEntry(entry redis.XMessage) (Message, error) {
 		return Message{}, fmt.Errorf("%w: missing payload", ErrInvalidMessage)
 	}
 	metadataRaw, ok := streamValue(entry.Values, metadataField)
-	if !ok || metadataRaw == "" {
+	// 旧版本把 nil metadata 写成 "null"；v2 会把它解成 nil map，这里统一成空对象，保证 Metadata 始终可写。
+	if !ok || metadataRaw == "" || metadataRaw == "null" {
 		metadataRaw = "{}"
 	}
 	metadata := make(map[string]string)

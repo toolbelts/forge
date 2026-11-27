@@ -2,12 +2,15 @@ package jobqueue
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"reflect"
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/toolbelts/forge/internal/jsonopt"
 )
 
 // handler 是 Subscribe 注册后的内部表示。
@@ -108,8 +111,8 @@ func (h *handler) decode(payload []byte) ([]reflect.Value, error) {
 		if len(payload) == 0 {
 			return nil, nil
 		}
-		var raws []json.RawMessage
-		if err := json.Unmarshal(payload, &raws); err != nil {
+		var raws []jsontext.Value
+		if err := json.Unmarshal(payload, &raws, jsonopt.Payload); err != nil {
 			return nil, fmt.Errorf("payload not a JSON array: %w", err)
 		}
 		if len(raws) != 0 {
@@ -118,8 +121,8 @@ func (h *handler) decode(payload []byte) ([]reflect.Value, error) {
 		return nil, nil
 	}
 
-	var raws []json.RawMessage
-	if err := json.Unmarshal(payload, &raws); err != nil {
+	var raws []jsontext.Value
+	if err := json.Unmarshal(payload, &raws, jsonopt.Payload); err != nil {
 		return nil, fmt.Errorf("payload not a JSON array: %w", err)
 	}
 	if len(raws) != len(h.paramTypes) {
@@ -129,7 +132,7 @@ func (h *handler) decode(payload []byte) ([]reflect.Value, error) {
 	values := make([]reflect.Value, len(h.paramTypes))
 	for i, t := range h.paramTypes {
 		ptr := reflect.New(t)
-		if err := json.Unmarshal(raws[i], ptr.Interface()); err != nil {
+		if err := json.Unmarshal(raws[i], ptr.Interface(), jsonopt.Payload); err != nil {
 			return nil, fmt.Errorf("decode arg #%d (%s): %w", i, t, err)
 		}
 		values[i] = ptr.Elem()

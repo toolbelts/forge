@@ -2,13 +2,13 @@ package provider
 
 import (
 	"context"
+	"encoding/json/v2"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
 
-	json "github.com/goccy/go-json"
 	"github.com/spf13/viper"
 
 	"github.com/toolbelts/forge/ioc"
@@ -65,7 +65,7 @@ func TestNotifyProviderLark(t *testing.T) {
 				Text string `json:"text"`
 			} `json:"content"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := json.UnmarshalRead(r.Body, &body); err != nil {
 			t.Errorf("decode lark request: %v", err)
 			w.WriteHeader(http.StatusBadRequest)
 			return

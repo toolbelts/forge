@@ -2,6 +2,7 @@ package message
 
 import (
 	"context"
+	"encoding/json/v2"
 	"fmt"
 	"maps"
 	"net/url"
@@ -9,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/goccy/go-json"
 	"resty.dev/v3"
 )
 
@@ -76,7 +76,8 @@ func (b *bytePlusSender) Send(ctx context.Context, msg SmsMessage) error {
 
 	paramJson := ""
 	if len(msg.Params) > 0 {
-		buf, err := json.Marshal(msg.Params)
+		// map 的键在 v2 默认不排序;固定顺序让同一组参数总是产生同一个请求体。
+		buf, err := json.Marshal(msg.Params, json.Deterministic(true))
 		if err != nil {
 			return fmt.Errorf("message: byteplus marshal code: %w", err)
 		}

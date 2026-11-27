@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json/v2"
 	"fmt"
 	"maps"
 	"regexp"
@@ -12,7 +13,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	json "github.com/goccy/go-json"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
 

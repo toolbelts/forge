@@ -2,7 +2,7 @@ package provider
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/v2"
 	"errors"
 	"net/http"
 	"runtime/debug"
@@ -169,5 +169,5 @@ func writeFallbackJson(w http.ResponseWriter, httpStatus int, e errkit.Error) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(httpStatus)
-	_ = json.NewEncoder(w).Encode(body)
+	_ = json.MarshalWrite(w, body, json.Deterministic(true))
 }

@@ -2,14 +2,13 @@ package message
 
 import (
 	"context"
+	"encoding/json/v2"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
-
-	"github.com/goccy/go-json"
 )
 
 func newBytePlusTestSender(t *testing.T, baseURL string) *bytePlusSender {

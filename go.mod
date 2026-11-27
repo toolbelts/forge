@@ -7,7 +7,6 @@ require (
 	github.com/alicebob/miniredis/v2 v2.37.0
 	github.com/fsnotify/fsnotify v1.10.0
 	github.com/go-viper/mapstructure/v2 v2.4.0
-	github.com/goccy/go-json v0.10.6
 	github.com/google/uuid v1.6.0
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7

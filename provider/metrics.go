@@ -21,9 +21,9 @@ import (
 // MetricsProvider OTel 指标提供者，使用 OTLP HTTP 协议把 metric 上报到 collector。
 //
 // 编排约定（与 TraceProvider 一致）：
-//   - 排在 LoggerProvider 之后、所有依赖 metric 的 Provider 之前。
-//     开启 metrics instrumentation 的 Provider 会在 Register/Setup 阶段装 metrics hook,
-//     必须保证此时全局 MeterProvider 已就绪，否则拿到的是 noop meter。
+//   - 排在 LoggerProvider 之后。forge 内会装 metrics hook 的 Provider(Redis/Database/Grpc/Gateway/队列)
+//     在 Setup 里通过 needOtel 先把本 Provider 拉起,保证全局 MeterProvider 已就绪,与注册顺序无关;
+//     业务代码若在自己的 Setup 里直接用全局 meter,仍应排在本 Provider 之后。
 //   - metrics.enabled=false 时全局保留 OTel 默认的 noop meter,且默认关闭自动 instrumentation。
 //
 // Resource 字段与 trace 一致，便于在 collector 侧按 service.* 关联：
@@ -37,10 +37,10 @@ type MetricsProvider struct {
 	shutdownTimeout time.Duration
 }
 
-// Register 读 metrics.* 配置；启用时构建 otlphttp exporter + MeterProvider，
+// Setup 读 metrics.* 配置；启用时构建 otlphttp exporter + MeterProvider，
 // 并把 *metricSdk.MeterProvider 注入容器供测试或外部插桩使用。
 // 未启用时不设 MeterProvider，OTel 自动回落到 noop，所有 instrumentation 不产生 metric。
-func (p *MetricsProvider) Register(ctx context.Context) error {
+func (p *MetricsProvider) Setup(ctx context.Context) error {
 	v := MustGetViper(ctx)
 	p.enabled = v.GetBool("metrics.enabled")
 	if !p.enabled {
@@ -95,17 +95,12 @@ func (p *MetricsProvider) Register(ctx context.Context) error {
 		p.shutdownTimeout = 5 * time.Second
 	}
 
-	ioc.MustInstance(ctx, p.mp)
+	ioc.FromContext(ctx).Instance(p.mp)
 	log.Ctx(ctx).Info().
 		Str("endpoint", endpoint).
 		Dur("interval", interval).
 		Str("env", env).
 		Msg("metrics exporter ready")
-	return nil
-}
-
-// Setup 无操作。
-func (p *MetricsProvider) Setup(ctx context.Context) error {
 	return nil
 }
 
@@ -126,5 +121,5 @@ func (p *MetricsProvider) Shutdown(ctx context.Context) error {
 // MustGetMeterProvider 从容器获取 *metricSdk.MeterProvider，缺失时 panic。
 // metrics.enabled=false 时容器内不存在，业务方需自行判断是否调用。
 func MustGetMeterProvider(ctx context.Context) *metricSdk.MeterProvider {
-	return ioc.MustGet[*metricSdk.MeterProvider](ctx)
+	return ioc.FromContext(ctx).MustGetFrom[*metricSdk.MeterProvider, *MetricsProvider]()
 }

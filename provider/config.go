@@ -52,8 +52,8 @@ func (p *ConfigProvider) WithEnvFiles(envs ...string) *ConfigProvider {
 	return p
 }
 
-// Register 加载所有 yaml 配置并将 viper 实例与应用名称绑定到容器。
-func (p *ConfigProvider) Register(ctx context.Context) error {
+// Setup 加载所有 yaml 配置并将 viper 实例与应用名称绑定到容器。
+func (p *ConfigProvider) Setup(ctx context.Context) error {
 	if len(p.names) == 0 {
 		return fmt.Errorf("config names is empty")
 	}
@@ -72,8 +72,7 @@ func (p *ConfigProvider) Register(ctx context.Context) error {
 		}
 		if err := load(); err != nil {
 			isLast := i == len(p.names)-1
-			var notFound viper.ConfigFileNotFoundError
-			if !isLast && errors.As(err, &notFound) {
+			if _, notFound := errors.AsType[viper.ConfigFileNotFoundError](err); notFound && !isLast {
 				continue
 			}
 			return fmt.Errorf("load config[%d] %s: %w", i, name, err)
@@ -89,23 +88,17 @@ func (p *ConfigProvider) Register(ctx context.Context) error {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
-	ioc.MustInstance(ctx, v)
-	ioc.MustInstance(ctx, AppName(p.appName))
+	ioc.FromContext(ctx).Instance(v).Instance(AppName(p.appName))
 
-	return nil
-}
-
-// Setup 无操作，配置加载已在 Register 阶段完成。
-func (p *ConfigProvider) Setup(ctx context.Context) error {
 	return nil
 }
 
 // MustGetViper 从容器获取 viper 实例，缺失时 panic。
 func MustGetViper(ctx context.Context) *viper.Viper {
-	return ioc.MustGet[*viper.Viper](ctx)
+	return ioc.FromContext(ctx).MustGetFrom[*viper.Viper, *ConfigProvider]()
 }
 
 // MustGetAppName 从容器获取应用名称，缺失时 panic。
 func MustGetAppName(ctx context.Context) AppName {
-	return ioc.MustGet[AppName](ctx)
+	return ioc.FromContext(ctx).MustGetFrom[AppName, *ConfigProvider]()
 }

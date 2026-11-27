@@ -1,6 +1,6 @@
 module github.com/toolbelts/forge
 
-go 1.26.1
+go 1.27.4
 
 require (
 	buf.build/go/protovalidate v1.2.0

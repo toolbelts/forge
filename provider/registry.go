@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
@@ -22,7 +23,7 @@ const registryDeregisterTimeout = 2 * time.Second
 
 // RegistryProvider 基于 Redis 的 gRPC 服务注册发现。
 //
-// 编排约定:排在 RedisProvider、GrpcProvider 之后(读 Redis client 与 grpc 实际监听端口),
+// 编排约定:排在 GrpcProvider 之后(读 grpc 实际监听端口;GrpcProvider 不会被提前拉起),
 // GatewayProvider 之前(让 gateway.grpc_endpoint 未来可改为 redis:///<service> 走自定义 resolver)。
 //
 // 行为:
@@ -31,33 +32,19 @@ const registryDeregisterTimeout = 2 * time.Second
 //   - 若 grpc.enabled=true,自动用 BuildInfo.InstanceId + 推导的 advertise host:port 注册当前实例
 //   - Shutdown 时主动 Deregister,kill -9 场景靠 TTL 兜底
 type RegistryProvider struct {
-	enabled bool
-	mgr     *registry.Manager
-	reg     *registry.Registration
-}
-
-// Register 读 registry.enabled,disabled 时 Setup/Shutdown 直接跳过。
-func (p *RegistryProvider) Register(ctx context.Context) error {
-	v := MustGetViper(ctx)
-	p.enabled = v.GetBool("registry.enabled")
-	if !p.enabled {
-		log.Ctx(ctx).Info().Str("provider", "registry").Msg("registry disabled, skip")
-	}
-	return nil
+	reg *registry.Registration
 }
 
 // Setup 构造 Manager 注入容器,全局注册 grpc resolver,
-// 若 grpc.enabled 则推导 advertise 地址自注册当前实例。
+// 若 grpc.enabled 则推导 advertise 地址自注册当前实例。registry.enabled=false 时跳过。
 func (p *RegistryProvider) Setup(ctx context.Context) error {
-	if !p.enabled {
+	v := MustGetViper(ctx)
+	if !v.GetBool("registry.enabled") {
+		log.Ctx(ctx).Info().Str("provider", "registry").Msg("registry disabled, skip")
 		return nil
 	}
 
-	v := MustGetViper(ctx)
-	redisName := v.GetString("registry.redis")
-	if redisName == "" {
-		redisName = registryDefaultRedisName
-	}
+	redisName := cmp.Or(v.GetString("registry.redis"), registryDefaultRedisName)
 
 	rdb, err := GetRedis(ctx, redisName)
 	if err != nil {
@@ -82,8 +69,7 @@ func (p *RegistryProvider) Setup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	p.mgr = mgr
-	ioc.MustInstance(ctx, p.mgr)
+	ioc.FromContext(ctx).Instance(mgr)
 	mgr.RegisterResolver()
 
 	log.Ctx(ctx).Info().
@@ -138,12 +124,12 @@ func (p *RegistryProvider) Shutdown(ctx context.Context) error {
 // 业务方在需要 client 端解析的代码里调 grpc.NewClient("redis:///<service>"),
 // 或直接 mgr.Resolve / mgr.Watch 拿实例列表。
 func MustGetRegistryManager(ctx context.Context) *registry.Manager {
-	return ioc.MustGet[*registry.Manager](ctx)
+	return ioc.FromContext(ctx).MustGetFrom[*registry.Manager, *RegistryProvider]()
 }
 
 // GetRegistryManager 从容器获取注册中心工厂。
 func GetRegistryManager(ctx context.Context) (*registry.Manager, error) {
-	return ioc.Get[*registry.Manager](ctx)
+	return ioc.FromContext(ctx).GetFrom[*registry.Manager, *RegistryProvider]()
 }
 
 // resolveAdvertiseHost 推导对外宣告的 host:配置 → grpc.addr host 段 → 内网私有 IPv4。

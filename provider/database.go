@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/viper"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 	"github.com/uptrace/bun/driver/pgdriver"
@@ -23,11 +22,14 @@ type DatabaseProvider struct {
 	otelEnabled bool
 }
 
-// Register 扫描 database.* 配置创建多个 bun.DB 实例，连通性验证后绑定到容器。
-func (p *DatabaseProvider) Register(ctx context.Context) error {
-	v := ioc.MustGet[*viper.Viper](ctx)
+// Setup 扫描 database.* 配置创建多个 bun.DB 实例，连通性验证后绑定到容器。
+func (p *DatabaseProvider) Setup(ctx context.Context) error {
+	v := MustGetViper(ctx)
 	dbMap := v.GetStringMap("database")
 	p.clients = make(map[string]*bun.DB, len(dbMap))
+	if err := needOtel(ctx); err != nil {
+		return err
+	}
 	p.otelEnabled = traceInstrumentationEnabled(v, observabilityComponentDatabase) ||
 		metricsInstrumentationEnabled(v, observabilityComponentDatabase)
 
@@ -70,16 +72,11 @@ func (p *DatabaseProvider) Register(ctx context.Context) error {
 			return fmt.Errorf("database [%s] ping failed: %w", name, err)
 		}
 
-		ioc.MustInstanceNamed(ctx, name, db)
+		ioc.FromContext(ctx).Instance(db, name)
 		p.clients[name] = db
 		log.Ctx(ctx).Info().Str("db_name", name).Msg("database connected")
 	}
 
-	return nil
-}
-
-// Setup 无操作。
-func (p *DatabaseProvider) Setup(ctx context.Context) error {
 	return nil
 }
 
@@ -97,12 +94,12 @@ func (p *DatabaseProvider) Shutdown(ctx context.Context) error {
 
 // GetDb 从容器获取指定名称的数据库句柄。
 func GetDb(ctx context.Context, name string) (*bun.DB, error) {
-	return ioc.GetNamed[*bun.DB](ctx, name)
+	return ioc.FromContext(ctx).GetFrom[*bun.DB, *DatabaseProvider](name)
 }
 
 // MustGetDb 从容器获取指定名称的数据库句柄，缺失时 panic。
 func MustGetDb(ctx context.Context, name string) *bun.DB {
-	return ioc.MustGetNamed[*bun.DB](ctx, name)
+	return ioc.FromContext(ctx).MustGetFrom[*bun.DB, *DatabaseProvider](name)
 }
 
 // debugQueryHook bun 全量查询钩子，以 zerolog debug 级别记录每条 SQL。

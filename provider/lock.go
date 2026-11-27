@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"cmp"
 	"context"
 
 	"github.com/rs/zerolog/log"
@@ -14,34 +15,19 @@ const lockDefaultRedisName = "default"
 
 // LockProvider 基于 Redis 的分布式锁工厂。
 //
-// 编排约定:排在 RedisProvider 之后。
+// 依赖 RedisProvider:取客户端时会先把它拉起,两者的注册顺序不限。
 // 不挂拦截器,只向容器注入 lock.Manager 供业务 handler 通过 MustGetLockManager 获取。
-type LockProvider struct {
-	enabled bool
-	lm      lock.Manager
-}
+type LockProvider struct{}
 
-// Register 读 lock.enabled,disabled 时 Setup 直接跳过。
-func (p *LockProvider) Register(ctx context.Context) error {
-	v := MustGetViper(ctx)
-	p.enabled = v.GetBool("lock.enabled")
-	if !p.enabled {
-		log.Ctx(ctx).Info().Str("provider", "lock").Msg("lock disabled, skip")
-	}
-	return nil
-}
-
-// Setup 取出 Redis 客户端并构造 lock.Manager,把 Manager 注入容器。
+// Setup 取出 Redis 客户端并构造 lock.Manager,把 Manager 注入容器。lock.enabled=false 时跳过。
 func (p *LockProvider) Setup(ctx context.Context) error {
-	if !p.enabled {
+	v := MustGetViper(ctx)
+	if !v.GetBool("lock.enabled") {
+		log.Ctx(ctx).Info().Str("provider", "lock").Msg("lock disabled, skip")
 		return nil
 	}
 
-	v := MustGetViper(ctx)
-	redisName := v.GetString("lock.redis")
-	if redisName == "" {
-		redisName = lockDefaultRedisName
-	}
+	redisName := cmp.Or(v.GetString("lock.redis"), lockDefaultRedisName)
 
 	rdb, err := GetRedis(ctx, redisName)
 	if err != nil {
@@ -67,8 +53,7 @@ func (p *LockProvider) Setup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	p.lm = lm
-	ioc.MustInstance(ctx, p.lm)
+	ioc.FromContext(ctx).Instance(lm)
 
 	log.Ctx(ctx).Info().
 		Str("provider", "lock").
@@ -80,10 +65,10 @@ func (p *LockProvider) Setup(ctx context.Context) error {
 // MustGetLockManager 从容器获取分布式锁工厂,缺失时 panic。
 // 业务方在需要互斥的 handler 中调 NewLocker(key) 拿到 *Locker 后再 Lock/Unlock。
 func MustGetLockManager(ctx context.Context) lock.Manager {
-	return ioc.MustGet[lock.Manager](ctx)
+	return ioc.FromContext(ctx).MustGetFrom[lock.Manager, *LockProvider]()
 }
 
 // GetLockManager 从容器获取分布式锁工厂。
 func GetLockManager(ctx context.Context) (lock.Manager, error) {
-	return ioc.Get[lock.Manager](ctx)
+	return ioc.FromContext(ctx).GetFrom[lock.Manager, *LockProvider]()
 }

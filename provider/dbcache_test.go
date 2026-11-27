@@ -62,11 +62,11 @@ func TestDbcacheProviderInvalidationSubscriptionLifecycle(t *testing.T) {
 				"dbcache.users.invalidation.enabled": tc.enabled,
 				"dbcache.users.invalidation.channel": tc.channel,
 			})
-			ioc.MustInstanceNamed[redis.UniversalClient](ctx, "cache", client)
+			ioc.FromContext(ctx).Instance[redis.UniversalClient](client, "cache")
 
 			p := &DbcacheProvider{}
-			if err := p.Register(ctx); err != nil {
-				t.Fatalf("register: %v", err)
+			if err := p.Setup(ctx); err != nil {
+				t.Fatalf("setup: %v", err)
 			}
 			waitForProviderSubscribers(t, client, tc.wantChannel, tc.wantSubs)
 			if err := p.Shutdown(ctx); err != nil {

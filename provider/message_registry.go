@@ -2,8 +2,8 @@ package provider
 
 import (
 	"fmt"
+	"maps"
 	"slices"
-	"sort"
 	"sync"
 	"time"
 
@@ -19,9 +19,8 @@ import (
 //
 // # ★ 注册时机
 //
-// 必须在 MessageProvider.Setup 之前。forge 的生命周期是「全部 Provider 的 Register
-// → 全部 Provider 的 Setup」,所以**业务 Provider 的 Register 就是那个位置**
-// (哪怕 MessageProvider 在 Provider 列表里排得更靠前);包级 init() 也可以。
+// 必须在 MessageProvider.Setup 之前,所以请在包级 init() 或 main 里 ioc.Run 之前注册。
+// 不要放进业务 Provider 的 Setup:MessageProvider 可能被别处的 MustGetMessageManager 提前拉起。
 // 晚了的表现是 Setup 报 unknown provider type —— 错误文本会把已注册的类型列出来,
 // 「没注册」与「注册晚了」一眼能分。
 //
@@ -131,22 +130,13 @@ func lookupEmailFactory(typ string) (EmailSenderFactory, bool) {
 func registeredSmsTypes() []string {
 	senderMu.RLock()
 	defer senderMu.RUnlock()
-	return sortedKeys(smsFactories)
+	return slices.Sorted(maps.Keys(smsFactories))
 }
 
 func registeredEmailTypes() []string {
 	senderMu.RLock()
 	defer senderMu.RUnlock()
-	return sortedKeys(emailFactories)
-}
-
-func sortedKeys[V any](m map[string]V) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
+	return slices.Sorted(maps.Keys(emailFactories))
 }
 
 // RegionFilter 把 include/exclude 转成可直接嵌入 sender 的过滤器。

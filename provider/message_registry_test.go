@@ -205,15 +205,12 @@ func registerOnce(t *testing.T, typ string, f SmsSenderFactory) {
 	})
 }
 
-// setupManager 跑一遍 MessageProvider 的 Register + Setup，返回容器里的 Manager。
+// setupManager 跑一遍 MessageProvider 的 Setup，返回容器里的 Manager。
 func setupManager(t *testing.T, v *viper.Viper) *message.Manager {
 	t.Helper()
-	ctx := ioc.NewContainer().WithContext(context.Background())
-	ioc.MustInstance(ctx, v)
+	ctx := ioc.New().WithContext(context.Background())
+	ioc.FromContext(ctx).Instance(v)
 	p := &MessageProvider{}
-	if err := p.Register(ctx); err != nil {
-		t.Fatalf("Register: %v", err)
-	}
 	if err := p.Setup(ctx); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}

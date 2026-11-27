@@ -16,7 +16,6 @@ import (
 	"google.golang.org/protobuf/protoadapt"
 
 	"github.com/toolbelts/forge/errkit"
-	"github.com/toolbelts/forge/ioc"
 )
 
 // ErrorProvider 注册 error 归一化拦截器到 InterceptorChain。
@@ -26,12 +25,9 @@ import (
 // 排在 RecoveryProvider 之后、ValidateProvider 之前。
 type ErrorProvider struct{}
 
-// Register 无前置依赖。
-func (p *ErrorProvider) Register(ctx context.Context) error { return nil }
-
 // Setup 把一元 + 流式归一化拦截器加进 chain。
 func (p *ErrorProvider) Setup(ctx context.Context) error {
-	chain := ioc.MustGet[*InterceptorChain](ctx)
+	chain := MustGetInterceptorChain(ctx)
 	chain.Use(errorUnaryInterceptor())
 	chain.UseStream(errorStreamInterceptor())
 	log.Ctx(ctx).Info().Str("provider", "error").Msg("error interceptor registered")

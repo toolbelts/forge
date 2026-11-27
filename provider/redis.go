@@ -8,7 +8,6 @@ import (
 	"github.com/redis/go-redis/extra/redisotel/v9"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/viper"
 
 	"github.com/toolbelts/forge/ioc"
 )
@@ -20,11 +19,14 @@ type RedisProvider struct {
 	metricsEnabled bool
 }
 
-// Register 扫描 redis.* 配置创建多个客户端，连通性验证后绑定到容器。
-func (p *RedisProvider) Register(ctx context.Context) error {
-	v := ioc.MustGet[*viper.Viper](ctx)
+// Setup 扫描 redis.* 配置创建多个客户端，连通性验证后绑定到容器。
+func (p *RedisProvider) Setup(ctx context.Context) error {
+	v := MustGetViper(ctx)
 	redisMap := v.GetStringMap("redis")
 	p.clients = make(map[string]redis.UniversalClient, len(redisMap))
+	if err := needOtel(ctx); err != nil {
+		return err
+	}
 	p.traceEnabled = traceInstrumentationEnabled(v, observabilityComponentRedis)
 	p.metricsEnabled = metricsInstrumentationEnabled(v, observabilityComponentRedis)
 
@@ -75,7 +77,7 @@ func (p *RedisProvider) Register(ctx context.Context) error {
 			return fmt.Errorf("redis [%s] ping failed: %w", name, err)
 		}
 
-		ioc.MustInstanceNamed[redis.UniversalClient](ctx, name, client)
+		ioc.FromContext(ctx).Instance[redis.UniversalClient](client, name)
 		p.clients[name] = client
 		log.Ctx(ctx).Info().
 			Str("redis_name", name).
@@ -83,11 +85,6 @@ func (p *RedisProvider) Register(ctx context.Context) error {
 			Msg("redis connected")
 	}
 
-	return nil
-}
-
-// Setup 无操作。
-func (p *RedisProvider) Setup(ctx context.Context) error {
 	return nil
 }
 
@@ -105,10 +102,10 @@ func (p *RedisProvider) Shutdown(ctx context.Context) error {
 
 // GetRedis 从容器获取指定名称的 Redis 客户端。
 func GetRedis(ctx context.Context, name string) (redis.UniversalClient, error) {
-	return ioc.GetNamed[redis.UniversalClient](ctx, name)
+	return ioc.FromContext(ctx).GetFrom[redis.UniversalClient, *RedisProvider](name)
 }
 
 // MustGetRedis 从容器获取指定名称的 Redis 通用客户端，缺失时 panic。
 func MustGetRedis(ctx context.Context, name string) redis.UniversalClient {
-	return ioc.MustGetNamed[redis.UniversalClient](ctx, name)
+	return ioc.FromContext(ctx).MustGetFrom[redis.UniversalClient, *RedisProvider](name)
 }

@@ -6,7 +6,6 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/toolbelts/forge/accesslog"
-	"github.com/toolbelts/forge/ioc"
 )
 
 // AccessLogProvider 把 gRPC 访问日志拦截器接入 InterceptorChain。
@@ -19,26 +18,16 @@ import (
 //
 // 一元拦截器与流式拦截器都接入:unary 含完整字段(req/resp 摘要、http 元数据等),
 // stream 走轻量字段(只在 handler 返回后打一条),避免长连接日志体积爆炸。
-type AccessLogProvider struct {
-	enabled bool
-}
-
-// Register 读 accesslog.enabled。disabled 时 Setup 直接跳过,不挂任何拦截器,与 token/ratelimit 风格一致。
-func (p *AccessLogProvider) Register(ctx context.Context) error {
-	v := MustGetViper(ctx)
-	p.enabled = v.GetBool("accesslog.enabled")
-	if !p.enabled {
-		log.Ctx(ctx).Info().Str("provider", "accesslog").Msg("accesslog disabled, skip")
-	}
-	return nil
-}
+type AccessLogProvider struct{}
 
 // Setup 读 accesslog.* 配置,把一元 + 流式拦截器加进 chain。
+// accesslog.enabled=false 时不挂任何拦截器,与 token/ratelimit 风格一致。
 func (p *AccessLogProvider) Setup(ctx context.Context) error {
-	if !p.enabled {
+	v := MustGetViper(ctx)
+	if !v.GetBool("accesslog.enabled") {
+		log.Ctx(ctx).Info().Str("provider", "accesslog").Msg("accesslog disabled, skip")
 		return nil
 	}
-	v := MustGetViper(ctx)
 
 	payload := v.GetBool("accesslog.payload")
 	payloadMaxBytes := v.GetInt("accesslog.payload_max_bytes")
@@ -55,7 +44,7 @@ func (p *AccessLogProvider) Setup(ctx context.Context) error {
 		accesslog.WithMaskFields(maskFields),
 	}
 
-	chain := ioc.MustGet[*InterceptorChain](ctx)
+	chain := MustGetInterceptorChain(ctx)
 	chain.Use(accesslog.UnaryInterceptor(opts...))
 	chain.UseStream(accesslog.StreamInterceptor(opts...))
 

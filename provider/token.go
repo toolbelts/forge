@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"cmp"
 	"context"
 	"errors"
 
@@ -37,39 +38,21 @@ const tokenDefaultRedisName = "default"
 // 隐含契约:本拦截器假设 token.Manager 不签发 user_id == 0 的 token,因此
 // user_id == 0 可作为"匿名"的可靠信号。后续若引入 user_id == 0 的合法用户,
 // 需重新设计匿名信号(例如 meta 增设布尔位)。
-type TokenProvider struct {
-	enabled       bool
-	skips         map[string]struct{}
-	optionalSkips map[string]struct{}
-	tm            token.Manager
-}
+type TokenProvider struct{}
 
-// Register 读 token.enabled / token.skips / token.optional_skips。
-// disabled 时 Setup 直接跳过,不创建 Manager 也不挂拦截器。
-func (p *TokenProvider) Register(ctx context.Context) error {
+// Setup 取出 Redis 客户端并构造 Manager,把 Manager 注入容器、把鉴权拦截器加进 chain。
+// token.enabled=false 时跳过,不创建 Manager 也不挂拦截器。
+func (p *TokenProvider) Setup(ctx context.Context) error {
 	v := MustGetViper(ctx)
-	p.enabled = v.GetBool("token.enabled")
-	if !p.enabled {
+	if !v.GetBool("token.enabled") {
 		log.Ctx(ctx).Info().Str("provider", "token").Msg("token disabled, skip")
 		return nil
 	}
 
-	p.skips = meta.BuildSkips(v.GetStringSlice("token.skips"))
-	p.optionalSkips = meta.BuildSkips(v.GetStringSlice("token.optional_skips"))
-	return nil
-}
+	skips := meta.BuildSkips(v.GetStringSlice("token.skips"))
+	optionalSkips := meta.BuildSkips(v.GetStringSlice("token.optional_skips"))
 
-// Setup 取出 Redis 客户端并构造 Manager,把 Manager 注入容器、把鉴权拦截器加进 chain。
-func (p *TokenProvider) Setup(ctx context.Context) error {
-	if !p.enabled {
-		return nil
-	}
-
-	v := MustGetViper(ctx)
-	redisName := v.GetString("token.redis")
-	if redisName == "" {
-		redisName = tokenDefaultRedisName
-	}
+	redisName := cmp.Or(v.GetString("token.redis"), tokenDefaultRedisName)
 
 	rdb, err := GetRedis(ctx, redisName)
 	if err != nil {
@@ -101,17 +84,16 @@ func (p *TokenProvider) Setup(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	p.tm = tm
-	ioc.MustInstance(ctx, p.tm)
+	ioc.FromContext(ctx).Instance(tm)
 
-	chain := ioc.MustGet[*InterceptorChain](ctx)
-	chain.Use(tokenUnaryInterceptor(p.tm, p.skips, p.optionalSkips))
+	chain := MustGetInterceptorChain(ctx)
+	chain.Use(tokenUnaryInterceptor(tm, skips, optionalSkips))
 
 	log.Ctx(ctx).Info().
 		Str("provider", "token").
 		Str("redis", redisName).
-		Int("skips", len(p.skips)).
-		Int("optional_skips", len(p.optionalSkips)).
+		Int("skips", len(skips)).
+		Int("optional_skips", len(optionalSkips)).
 		Msg("token interceptor registered")
 	return nil
 }
@@ -188,10 +170,10 @@ func tokenUnaryInterceptor(
 // MustGetTokenManager 从容器获取 token 管理器,缺失时 panic。
 // 业务方在登录/退出/续期 handler 中调 Create/Refresh/Delete 等。
 func MustGetTokenManager(ctx context.Context) token.Manager {
-	return ioc.MustGet[token.Manager](ctx)
+	return ioc.FromContext(ctx).MustGet[token.Manager]()
 }
 
 // GetTokenManager 从容器获取 token 管理器。
 func GetTokenManager(ctx context.Context) (token.Manager, error) {
-	return ioc.Get[token.Manager](ctx)
+	return ioc.FromContext(ctx).Get[token.Manager]()
 }

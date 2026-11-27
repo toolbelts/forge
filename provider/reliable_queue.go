@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"cmp"
 	"context"
 	"time"
 
@@ -19,18 +20,15 @@ type ReliableQueueProvider struct {
 	shutdownTimeout time.Duration
 }
 
-// Register 读取 reliablequeue 配置并注册 Queue；启用时依赖更早的 RedisProvider。
-func (provider *ReliableQueueProvider) Register(ctx context.Context) error {
+// Setup 读取 reliablequeue 配置并注册 Queue；启用时依赖更早的 RedisProvider。
+func (provider *ReliableQueueProvider) Setup(ctx context.Context) error {
 	viper := MustGetViper(ctx)
 	provider.enabled = viper.GetBool("reliablequeue.enabled")
 	if !provider.enabled {
 		log.Ctx(ctx).Info().Str("provider", "reliablequeue").Msg("reliablequeue disabled, skip register")
 		return nil
 	}
-	redisName := viper.GetString("reliablequeue.redis")
-	if redisName == "" {
-		redisName = reliableQueueDefaultRedisName
-	}
+	redisName := cmp.Or(viper.GetString("reliablequeue.redis"), reliableQueueDefaultRedisName)
 	client := MustGetRedis(ctx, redisName)
 	options := []reliablequeue.QueueOption{
 		reliablequeue.WithBlockTimeout(viper.GetDuration("reliablequeue.block_timeout")),
@@ -43,6 +41,9 @@ func (provider *ReliableQueueProvider) Register(ctx context.Context) error {
 		),
 		reliablequeue.WithDlqTopic(viper.GetString("reliablequeue.dlq_topic")),
 	}
+	if err := needOtel(ctx); err != nil {
+		return err
+	}
 	if metricsInstrumentationEnabled(viper, observabilityComponentReliableQueue) {
 		options = append(options, reliablequeue.WithMetrics(reliablequeue.NewOTelMetrics()))
 	}
@@ -52,7 +53,7 @@ func (provider *ReliableQueueProvider) Register(ctx context.Context) error {
 	}
 	provider.queue = queue
 	provider.shutdownTimeout = viper.GetDuration("reliablequeue.shutdown_timeout")
-	ioc.MustInstance(ctx, queue)
+	ioc.FromContext(ctx).Instance(queue)
 	log.Ctx(ctx).Info().
 		Str("provider", "reliablequeue").
 		Str("redis", redisName).
@@ -62,13 +63,9 @@ func (provider *ReliableQueueProvider) Register(ctx context.Context) error {
 	return nil
 }
 
-// Setup 不注册业务订阅；业务 Provider 在自己的 Setup 中调用 Queue.Subscribe。
-func (*ReliableQueueProvider) Setup(context.Context) error { return nil }
-
 // Serve 启动 Queue 并阻塞到应用上下文取消。
 func (provider *ReliableQueueProvider) Serve(ctx context.Context) error {
 	if !provider.enabled {
-		<-ctx.Done()
 		return nil
 	}
 	if err := provider.queue.Start(ctx); err != nil {
@@ -103,10 +100,10 @@ func (provider *ReliableQueueProvider) Shutdown(ctx context.Context) error {
 
 // GetReliableQueue 从容器获取启用的 ReliableQueue。
 func GetReliableQueue(ctx context.Context) (*reliablequeue.Queue, error) {
-	return ioc.Get[*reliablequeue.Queue](ctx)
+	return ioc.FromContext(ctx).GetFrom[*reliablequeue.Queue, *ReliableQueueProvider]()
 }
 
 // MustGetReliableQueue 从容器获取 ReliableQueue，缺失时 panic。
 func MustGetReliableQueue(ctx context.Context) *reliablequeue.Queue {
-	return ioc.MustGet[*reliablequeue.Queue](ctx)
+	return ioc.FromContext(ctx).MustGetFrom[*reliablequeue.Queue, *ReliableQueueProvider]()
 }

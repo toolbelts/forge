@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/viper"
 
 	"github.com/toolbelts/forge/ioc"
 )
@@ -25,9 +24,9 @@ type TcpProvider struct {
 	wg       sync.WaitGroup
 }
 
-// Register 当 tcp.enabled 为真时建立监听，listener 不暴露到容器。
-func (p *TcpProvider) Register(ctx context.Context) error {
-	v := ioc.MustGet[*viper.Viper](ctx)
+// Setup 当 tcp.enabled 为真时建立监听，listener 不暴露到容器。
+func (p *TcpProvider) Setup(ctx context.Context) error {
+	v := MustGetViper(ctx)
 	p.enabled = v.GetBool("tcp.enabled")
 	if !p.enabled {
 		log.Ctx(ctx).Info().Str("provider", "tcp").Msg("tcp disabled, skip register")
@@ -48,20 +47,14 @@ func (p *TcpProvider) Register(ctx context.Context) error {
 	return nil
 }
 
-// Setup 无操作，业务方在自己的 Setup 中通过 MustSetTcpHandler 注入连接处理器。
-func (p *TcpProvider) Setup(ctx context.Context) error {
-	return nil
-}
-
 // Serve 当 enabled 时启动 accept loop 并将连接派发给已注入的 TcpHandler。
 // listener 的关闭由 Shutdown 触发，关闭后 Accept 返回 net.ErrClosed，循环正常退出。
 func (p *TcpProvider) Serve(ctx context.Context) error {
 	if !p.enabled {
-		<-ctx.Done()
 		return nil
 	}
 
-	handler, err := ioc.Get[TcpHandler](ctx)
+	handler, err := ioc.FromContext(ctx).Get[TcpHandler]()
 	if err != nil {
 		return fmt.Errorf("get tcp handler: %w", err)
 	}
@@ -108,10 +101,10 @@ func (p *TcpProvider) Shutdown(ctx context.Context) error {
 
 // MustSetTcpHandler 将 TcpHandler 注入到容器，业务方应在 Setup 阶段调用。
 func MustSetTcpHandler(ctx context.Context, h TcpHandler) {
-	ioc.MustInstance(ctx, h)
+	ioc.FromContext(ctx).Instance(h)
 }
 
 // GetTcpHandler 从容器读取 TcpHandler。
 func GetTcpHandler(ctx context.Context) (TcpHandler, error) {
-	return ioc.Get[TcpHandler](ctx)
+	return ioc.FromContext(ctx).Get[TcpHandler]()
 }

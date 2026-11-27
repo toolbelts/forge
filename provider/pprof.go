@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"cmp"
 	"context"
 	nhpprof "net/http/pprof"
 	"runtime"
@@ -16,8 +17,8 @@ import (
 //   - 实际生效条件是 http.enabled && pprof.enabled，任一为 false 即跳过挂载。
 //     pprof 复用 HttpProvider 的 mux 与 server，http 未启用时静默禁用而非 panic，
 //     便于不同环境共用同一份配置。
-//   - 排在 HttpProvider 之后，语义上"先有 mux，后挂 pprof"。功能上无强约束，
-//     因为 ioc 是 RegisterAll → SetupAll 两阶段（见 pkg/ioc/lifecycle_test.go）。
+//   - 必须排在 HttpProvider 之后：先有 mux，才能挂 pprof。HttpProvider 要读中间件链，
+//     不会被 MustGetHttpMux 提前拉起，顺序不对时启动直接报 binding not found。
 //
 // 安全提示：pprof 与业务 HTTP 共端口，生产环境应通过反向代理 / ACL 屏蔽
 // pprof.path_prefix 配置的路径，或通过 pprof.enabled 关闭。
@@ -32,21 +33,15 @@ import (
 // 默认采样：mutex_fraction=100、block_rate=10000(ns)，开箱可用且开销 < 1%。
 // 显式写 0 可关闭对应采样。threadcreate 路由由 runtime/pprof 默认注册但数据始终
 // 为空（golang/go#6104，Go runtime 自身缺陷，与本框架无关）。
-type PprofProvider struct {
-	enabled       bool
-	mountPrefix   string
-	mutexFraction int
-	blockRate     int
-}
+type PprofProvider struct{}
 
-// Register 读 pprof.* 与 http.enabled，仅当两者都为 true 时标记自身启用。
-// http 未启用时直接静默跳过，不做副作用。
-func (p *PprofProvider) Register(ctx context.Context) error {
+// Setup 读 pprof.* 与 http.enabled，两者都为 true 时拿 *http.ServeMux 注册 pprof handler，并按需打开 runtime 采样。
+// http 未启用时直接静默跳过，不做副作用；启用时 HttpProvider 已把 mux 注入容器，MustGetHttpMux 必能命中。
+func (p *PprofProvider) Setup(ctx context.Context) error {
 	v := MustGetViper(ctx)
 	pprofOn := v.GetBool("pprof.enabled")
 	httpOn := v.GetBool("http.enabled")
-	p.enabled = pprofOn && httpOn
-	if !p.enabled {
+	if !pprofOn || !httpOn {
 		log.Ctx(ctx).Info().
 			Str("provider", "pprof").
 			Bool("pprof_enabled", pprofOn).
@@ -55,54 +50,39 @@ func (p *PprofProvider) Register(ctx context.Context) error {
 		return nil
 	}
 
-	p.mountPrefix = v.GetString("pprof.path_prefix")
-	if p.mountPrefix == "" {
-		p.mountPrefix = "/debug/pprof/"
-	}
+	mountPrefix := cmp.Or(v.GetString("pprof.path_prefix"), "/debug/pprof/")
 	// GetInt 缺失时返回 0 会误关采样,所以默认非零的开关必须 IsSet 守卫;
 	// 显式配 0 表示用户主动关闭采样,予以保留。
+	mutexFraction, blockRate := 100, 10000
 	if v.IsSet("pprof.mutex_fraction") {
-		p.mutexFraction = v.GetInt("pprof.mutex_fraction")
-	} else {
-		p.mutexFraction = 100
+		mutexFraction = v.GetInt("pprof.mutex_fraction")
 	}
 	if v.IsSet("pprof.block_rate") {
-		p.blockRate = v.GetInt("pprof.block_rate")
-	} else {
-		p.blockRate = 10000
-	}
-	return nil
-}
-
-// Setup 拿 *http.ServeMux 注册 pprof handler；按需打开 runtime 采样。
-// p.enabled 已在 Register 阶段保证 http.enabled=true，MustGetHttpMux 必能命中。
-func (p *PprofProvider) Setup(ctx context.Context) error {
-	if !p.enabled {
-		return nil
+		blockRate = v.GetInt("pprof.block_rate")
 	}
 
 	mux := MustGetHttpMux(ctx)
-	mux.HandleFunc(p.mountPrefix, nhpprof.Index)
-	mux.HandleFunc(p.mountPrefix+"cmdline", nhpprof.Cmdline)
-	mux.HandleFunc(p.mountPrefix+"profile", nhpprof.Profile)
-	mux.HandleFunc(p.mountPrefix+"symbol", nhpprof.Symbol)
-	mux.HandleFunc(p.mountPrefix+"trace", nhpprof.Trace)
+	mux.HandleFunc(mountPrefix, nhpprof.Index)
+	mux.HandleFunc(mountPrefix+"cmdline", nhpprof.Cmdline)
+	mux.HandleFunc(mountPrefix+"profile", nhpprof.Profile)
+	mux.HandleFunc(mountPrefix+"symbol", nhpprof.Symbol)
+	mux.HandleFunc(mountPrefix+"trace", nhpprof.Trace)
 	for _, prof := range runtimepprof.Profiles() {
 		name := prof.Name()
-		mux.Handle(p.mountPrefix+name, nhpprof.Handler(name))
+		mux.Handle(mountPrefix+name, nhpprof.Handler(name))
 	}
 
-	if p.mutexFraction > 0 {
-		runtime.SetMutexProfileFraction(p.mutexFraction)
+	if mutexFraction > 0 {
+		runtime.SetMutexProfileFraction(mutexFraction)
 	}
-	if p.blockRate > 0 {
-		runtime.SetBlockProfileRate(p.blockRate)
+	if blockRate > 0 {
+		runtime.SetBlockProfileRate(blockRate)
 	}
 
 	log.Ctx(ctx).Info().
-		Str("mount", p.mountPrefix).
-		Int("mutex_fraction", p.mutexFraction).
-		Int("block_rate", p.blockRate).
+		Str("mount", mountPrefix).
+		Int("mutex_fraction", mutexFraction).
+		Int("block_rate", blockRate).
 		Msg("pprof routes registered")
 	return nil
 }

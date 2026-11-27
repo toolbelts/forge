@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"cmp"
 	"context"
 	"time"
 
@@ -12,7 +13,7 @@ import (
 
 const jobqueueDefaultRedisName = "default"
 
-// JobQueueProvider 任务队列提供者:Register 阶段构造 *jobqueue.Queue 并注入容器,
+// JobQueueProvider 任务队列提供者:Setup 中构造 *jobqueue.Queue 并注入容器,
 // 业务方在自己的 Setup 中通过 MustGetJobQueue(ctx) 拿到队列再 Subscribe。
 //
 // 行为约定:
@@ -26,7 +27,7 @@ const jobqueueDefaultRedisName = "default"
 //     Publish 转 fire-and-forget,缓冲到上限或时间窗后批量 LPUSH。
 //     缺一项或非法值跳过并 warn,适合在线状态/心跳等"单条不重要"事件。
 //   - metrics instrumentation 开启时接 jobqueue.NewOTelMetrics();否则使用 NoopMetrics
-//   - Serve 仅在 enabled 时启动 worker 并阻塞到 ctx 取消
+//   - Serve 仅在 enabled 时启动 worker 并阻塞到 ctx 取消,否则直接返回
 //   - Shutdown 通过 queue.Stop() 等待 worker 与 coalesce drain 收尾,超时阈值 jobqueue.shutdown_timeout
 type JobQueueProvider struct {
 	enabled         bool
@@ -35,8 +36,8 @@ type JobQueueProvider struct {
 	metricsEnabled  bool
 }
 
-// Register 读 jobqueue.* 配置,构造 *jobqueue.Queue 并注入容器。enabled=false 静默跳过。
-func (p *JobQueueProvider) Register(ctx context.Context) error {
+// Setup 读 jobqueue.* 配置,构造 *jobqueue.Queue 并注入容器。enabled=false 静默跳过。
+func (p *JobQueueProvider) Setup(ctx context.Context) error {
 	v := MustGetViper(ctx)
 	p.enabled = v.GetBool("jobqueue.enabled")
 	if !p.enabled {
@@ -44,15 +45,15 @@ func (p *JobQueueProvider) Register(ctx context.Context) error {
 		return nil
 	}
 
-	redisName := v.GetString("jobqueue.redis")
-	if redisName == "" {
-		redisName = jobqueueDefaultRedisName
-	}
+	redisName := cmp.Or(v.GetString("jobqueue.redis"), jobqueueDefaultRedisName)
 	client := MustGetRedis(ctx, redisName)
 
 	keyPrefix := v.GetString("jobqueue.key_prefix")
 	p.shutdownTimeout = v.GetDuration("jobqueue.shutdown_timeout")
 	maxLen := v.GetInt("jobqueue.max_len")
+	if err := needOtel(ctx); err != nil {
+		return err
+	}
 	p.metricsEnabled = metricsInstrumentationEnabled(v, observabilityComponentJobqueue)
 
 	opts := []jobqueue.QueueOption{jobqueue.WithDefaultMaxLen(maxLen)}
@@ -86,7 +87,7 @@ func (p *JobQueueProvider) Register(ctx context.Context) error {
 		return err
 	}
 	p.queue = q
-	ioc.MustInstance(ctx, p.queue)
+	ioc.FromContext(ctx).Instance(p.queue)
 
 	log.Ctx(ctx).Info().
 		Str("provider", "jobqueue").
@@ -99,15 +100,9 @@ func (p *JobQueueProvider) Register(ctx context.Context) error {
 	return nil
 }
 
-// Setup 无操作。业务方在自己的 Setup 里 MustGetJobQueue(ctx).Subscribe(...)。
-func (p *JobQueueProvider) Setup(ctx context.Context) error {
-	return nil
-}
-
-// Serve 启动 worker 并阻塞到 ctx 取消。enabled=false 时仅 wait,不参与消费。
+// Serve 启动 worker 并阻塞到 ctx 取消。enabled=false 时直接返回,不参与消费。
 func (p *JobQueueProvider) Serve(ctx context.Context) error {
 	if !p.enabled {
-		<-ctx.Done()
 		return nil
 	}
 	if err := p.queue.Start(ctx); err != nil {
@@ -148,11 +143,11 @@ func (p *JobQueueProvider) Shutdown(ctx context.Context) error {
 
 // GetJobQueue 从容器获取 *jobqueue.Queue。
 func GetJobQueue(ctx context.Context) (*jobqueue.Queue, error) {
-	return ioc.Get[*jobqueue.Queue](ctx)
+	return ioc.FromContext(ctx).GetFrom[*jobqueue.Queue, *JobQueueProvider]()
 }
 
 // MustGetJobQueue 从容器获取 *jobqueue.Queue,缺失时 panic
 // (通常是 jobqueue.enabled=false 时被业务方误用)。
 func MustGetJobQueue(ctx context.Context) *jobqueue.Queue {
-	return ioc.MustGet[*jobqueue.Queue](ctx)
+	return ioc.FromContext(ctx).MustGetFrom[*jobqueue.Queue, *JobQueueProvider]()
 }

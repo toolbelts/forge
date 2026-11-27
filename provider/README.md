@@ -1,21 +1,24 @@
 # forge/provider
 
-把 forge 各子库 (redis、gRPC、限速、token 等) 封装成 `Provider`,由 `ioc.App` 统一编排:配置驱动、生命周期一致、按需启用。
+把 forge 各子库 (redis、gRPC、限速、token 等) 封装成 `Provider`,由 `ioc.Container` 统一编排:配置驱动、生命周期一致、按需启用。
 
-接入只需三步:写 yaml → `App.Use(...)` 按推荐顺序串起来 → `App.Run(ctx, nil)` 起服务。
+接入只需三步:写 yaml → `c.Instance(...)` 按推荐顺序串起来 → `c.Run(ctx)` 起服务。
 
 ---
 
 ## 1. 概述
 
-每个 Provider 实现 `Register(ctx) error` + `Setup(ctx) error`,按需再实现 `Serve(ctx) error` / `Shutdown(ctx) error`。`ioc.App.Run(ctx, fn)` 内部按以下顺序跑:
+每个 Provider 就是一个绑定到容器的普通实例,按需实现 `ioc` 的三个可选接口:`Setup(ctx) error`(初始化)、`Serve(ctx) error`(阻塞式服务)、`Shutdown(ctx) error`(释放资源)。`c.Run(ctx)` 内部按以下顺序跑:
 
-1. `RegisterAll` — 按 `Use` 顺序逐个 Register,只读 viper / 不依赖其它 Provider 已 Setup 的产物
-2. `SetupAll` — 同序逐个 Setup,可从容器取上一阶段已注入的实例
-3. `Serve`(`fn == nil`) 或 `fn(ctx)`(CLI 模式) — Serve 模式下所有 `Server` 并发跑,任一退出即触发收敛
-4. `ShutdownAll` — 已成功 Setup 的 Provider 反向(LIFO)执行 Shutdown
+1. `Boot` — 按注册顺序逐个 `Setup`。每个 Setup 可以往容器里注入自己的产物,也可以取别的 Provider 的产物;取的时候如果对方还没 Setup,容器会先把它 Setup(见第 2 节)
+2. `Serve` — 所有实现了 `Server` 的 Provider 并发跑。任一 Serve 返回 error,或全部 Serve 都返回,即触发收尾
+3. `Shutdown` — 已成功 Setup 的 Provider 按逆序执行 Shutdown
 
-任一阶段返回 error 立即收敛:Register 失败放弃启动,Setup 失败对已 Setup 的依赖反向 Shutdown,避免半启动状态。`SIGINT` / `SIGTERM` 通过 ctx 传给 fn / Serve(详见 `ioc/app.go`)。
+一次性任务(CLI 子命令、批处理)用 `c.Exec(ctx, fn)`:`Boot → fn(ctx) → Shutdown`,不启动任何 Server。
+
+任一 Setup 返回 error 立即收尾:对已 Setup 的 Provider 逆序 Shutdown,避免半启动状态。`SIGINT` / `SIGTERM` 通过 ctx 传给 fn / Serve,视为正常退出;收尾期间再次收到信号进程立即终止(详见 `ioc/ioc.go`)。
+
+Setup / Serve / Shutdown 收到的 ctx 带着容器,`provider.MustGetXxx(ctx)` 这类访问函数都从它取实例。**请求级 ctx(gRPC handler 的 ctx)不带容器**,依赖要在 Setup 时取出来存到自己的结构里。
 
 **统一约定**
 
@@ -32,41 +35,43 @@
 
 ## 2. 推荐编排顺序
 
-`App.Use(...)` 调用顺序决定两件事:
+Provider 之间的**依赖不靠注册顺序**:`provider.MustGetXxx(ctx)` 取产物时,如果产出它的 Provider 还没 Setup,容器会先把它 Setup(收尾时相应地后关)。所以 `LockProvider` 可以写在 `RedisProvider` 前面,业务 Provider 也不用关心基础设施的先后;互相依赖会在启动时报 `ioc: dependency cycle`。
 
-1. **Register 阶段顺序** — 所有 Register 完成后才进入 Setup,但 Register 内部读取的容器实例必须在更早的 Provider 已注入。例:启用 instrumentation 时,`MetricsProvider`/`TraceProvider` 必须在 `RedisProvider` / `DatabaseProvider` 之前 — 后两者在 Register 时挂 OTel hook,需要全局 MeterProvider/TracerProvider 已就绪
-2. **Setup 阶段顺序** — `InterceptorChain.Use` 调用是 Setup 阶段的 side effect,而 `GrpcProvider.Setup` 读 chain 来构造 `*grpc.Server`。所以**所有拦截器 Provider 必须在 `GrpcProvider` 之前 Use**,否则 chain 在 Grpc 构造 server 时还是空的。`MiddlewareChain.Use` 同理:`HttpProvider.Setup` / `GatewayProvider.Setup` 读各自命名链(`http` / `gateway`)包装 server handler,**HTTP 中间件 Provider 必须在两者之前 Use**
+仍然由注册顺序决定的只有两件事:
 
-LIFO Shutdown 自动反向,无需手动管理。
+1. **读写链的 Provider 不会被提前拉起** — `GrpcProvider` / `HttpProvider` / `GatewayProvider`(消费链)和 `TokenProvider` / `RateLimitProvider`(往链上加拦截器)的 Setup 结果取决于执行时机,所以取它们的产物(`MustGetGrpcServer`、`MustGetHttpMux`、`MustGetTokenManager` 等)时必须排在它们之后,否则启动报 `ioc: binding not found`
+2. **链的内容** — `InterceptorChain.Use` 是各拦截器 Provider 在 Setup 里的 side effect,而 `GrpcProvider.Setup` 读 chain 来构造 `*grpc.Server`。所以**所有拦截器 Provider 必须注册在 `GrpcProvider` 之前**,否则构造 server 时 chain 还是空的。`MiddlewareChain.Use` 同理:`HttpProvider.Setup` / `GatewayProvider.Setup` 读各自命名链(`http` / `gateway`)包装 server handler,**HTTP 中间件 Provider 必须注册在两者之前**
+
+Shutdown 自动按逆序执行,无需手动管理。
 
 ### A. 基础(必装,一开始就 Use)
 
 | # | Provider | 说明 |
 |---|---|---|
-| 1 | `BuildProvider` | 注入 `*BuildInfo`。**必须在** Trace/Metrics/Notify 之前(它们的 Register 读 `MustGetBuildInfo`) |
+| 1 | `BuildProvider` | 注入 `*BuildInfo`,Trace/Metrics/Notify 的 Setup 会读它 |
 | 2 | `ConfigProvider` | viper + .env 加载,所有后续 Provider 的前置 |
 | 3 | `LoggerProvider` | zerolog 全局 logger,读 `log.level` 并热重载 |
-| 4 | `MetricsProvider` | OTel MeterProvider。启用 metrics instrumentation 时,必须早于 Redis/Database/Gateway/JobQueue/ReliableQueue 等会挂 hook 的 Provider |
-| 5 | `TraceProvider` | OTel TracerProvider + Propagator。启用 trace instrumentation 时,必须早于 Redis/Database/Gateway 等会挂 hook 的 Provider |
-| 6 | `NotifyProvider` | 通知器,被 `RecoveryProvider.Setup` 引用。本身实现 `Server`:所有 Provider Setup 完成后发 "started",Shutdown 阶段(LIFO 最末)发 "stopped" — 所以位置要靠前 |
+| 4 | `MetricsProvider` | OTel MeterProvider。Redis/Database/Grpc/Gateway/JobQueue/ReliableQueue 挂 hook 前会先把它拉起 |
+| 5 | `TraceProvider` | OTel TracerProvider + Propagator。Redis/Database/Grpc/Gateway 挂 hook 前会先把它拉起 |
+| 6 | `NotifyProvider` | 通知器,被 `RecoveryProvider.Setup` 引用。本身实现 `Server`:所有 Provider Setup 完成后发 "started",Shutdown 阶段(逆序,越靠前越晚)发 "stopped" — 所以位置要靠前 |
 
 ### B. 数据层(按需)
 
 | # | Provider | 说明 |
 |---|---|---|
-| 7 | `RedisProvider` | 多实例 redis 客户端。`Register` 阶段就把客户端注入容器;按 instrumentation 配置决定是否挂 redisotel hook |
+| 7 | `RedisProvider` | 多实例 redis 客户端,Setup 时注入容器;按 instrumentation 配置决定是否挂 redisotel hook |
 | 8 | `DatabaseProvider` | 多实例 `*bun.DB`;按 instrumentation 配置决定是否挂 bunotel query hook |
 | 9 | `MigrationProvider` | 仅迁移子命令路径下注册,正常 serve 不挂(参见 `migration.go` 顶部注释) |
-| 10 | `LockProvider` | 分布式锁工厂(Setup 时取 Redis 客户端,顺序无强约束) |
+| 10 | `LockProvider` | 分布式锁工厂。Setup 时取 Redis 客户端 |
 | 11 | `CronProvider` | 定时任务调度器 |
-| 12 | `JobQueueProvider` | redis 任务队列。**Register** 阶段就调 `MustGetRedis`,所以必须在 `RedisProvider` 之后 |
-| 13 | `ReliableQueueProvider` | Redis Streams 至少一次队列。**Register** 阶段就调 `MustGetRedis`,所以必须在 `RedisProvider` 之后 |
-| 14 | `DbcacheProvider` | 数据库缓存 Store 工厂。redis / tiered 后端 **Register** 阶段调 `GetRedis`,所以必须在 `RedisProvider` 之后 |
+| 12 | `JobQueueProvider` | redis 任务队列。Setup 时取 Redis 客户端 |
+| 13 | `ReliableQueueProvider` | Redis Streams 至少一次队列。Setup 时取 Redis 客户端 |
+| 14 | `DbcacheProvider` | 数据库缓存 Store 工厂。redis / tiered 后端 Setup 时取 Redis 客户端 |
 | 15 | `MessageProvider` | 邮件 / 短信路由,无外部依赖 |
 
-### C. gRPC 拦截器(按链外→内顺序 Use,**全部放在 GrpcProvider 之前**)
+### C. gRPC 拦截器(按链外→内顺序注册,**全部放在 GrpcProvider 之前**)
 
-`InterceptorChain.Use` 是追加,**Use 顺序 = 外层执行顺序**(见 `provider/interceptor.go:13`)。把下列 Provider 严格按此序 Use:
+`InterceptorChain.Use` 是追加,**Use 顺序 = 外层执行顺序**(见 `provider/interceptor.go`)。把下列 Provider 严格按此序注册:
 
 | # | Provider | 拦截器位置 | 说明 |
 |---|---|---|---|
@@ -77,25 +82,25 @@ LIFO Shutdown 自动反向,无需手动管理。
 | 20 | `ValidateProvider` | 内四层 | protovalidate,纯内存 CEL |
 | 21 | `TokenProvider` | 最内层 | Setup 同时构造 `token.Manager` 实例 + 挂拦截器。鉴权要查 Redis,放最后让畸形请求先被前面砍掉 |
 
-> 即使不启用 gRPC,`InterceptorChain` 也是在 `GrpcProvider.Register` 阶段创建的 — 所以 `GrpcProvider` 必须 Use(可以 `enabled=false`),否则 ioc.MustGet 会 panic。
+> `InterceptorChain` 没有固定的创建者:第一个调 `provider.MustGetInterceptorChain(ctx)` 的 Provider 创建它。所以不启用 gRPC 时可以不注册 `GrpcProvider`,拦截器 Provider 照常工作(只是没人消费这条链)。
 
 ### D. 服务端(按需)
 
 | # | Provider | 说明 |
 |---|---|---|
-| 22 | `GrpcProvider` | `Register` 抢端口 + 注入 `*InterceptorChain`;`Setup` 阶段读 chain 构造 `*grpc.Server`。**所有拦截器 Provider 必须 Use 在它之前** |
-| 23 | `HttpProvider` | `Register` 注入命名 `http` 的 `*MiddlewareChain` 并把 `*http.ServeMux` 注入容器;`Setup` 用链包装 mux。**HTTP 中间件 Provider 必须 Use 在它之前** |
-| 24 | `PprofProvider` | 复用 HttpProvider 的 mux,仅当 `pprof.enabled && http.enabled` 才挂 |
-| 25 | `GatewayProvider` | grpc-gateway,反向 dial gRPC 后端;`Register` 注入命名 `gateway` 的 `*MiddlewareChain`,`Setup` 用链包装 gateway mux(trace 提取在链外最外层)。**HTTP 中间件 Provider 必须 Use 在它之前** |
+| 22 | `GrpcProvider` | Setup 抢端口,读 `*InterceptorChain` 构造 `*grpc.Server`,把 listener 和 server 注入容器。**所有拦截器 Provider 必须注册在它之前**,注册 gRPC service 的业务 Provider 在它之后 |
+| 23 | `HttpProvider` | Setup 把 `*http.ServeMux` 注入容器,并用命名 `http` 的 `*MiddlewareChain` 包装 mux。**HTTP 中间件 Provider 必须注册在它之前**,注册路由的业务 Provider 在它之后 |
+| 24 | `PprofProvider` | 复用 HttpProvider 的 mux,仅当 `pprof.enabled && http.enabled` 才挂。必须在 `HttpProvider` 之后 |
+| 25 | `GatewayProvider` | grpc-gateway,反向 dial gRPC 后端;Setup 用命名 `gateway` 的 `*MiddlewareChain` 包装 gateway mux(trace 提取在链外最外层)。**HTTP 中间件 Provider 必须注册在它之前** |
 | 26 | `TcpProvider` | 通用 TCP accept loop,业务方通过 `MustSetTcpHandler(ctx, h)` 注入 `TcpHandler` |
 
-> `MiddlewareChain` 与 `InterceptorChain` 同理:即使 `http.enabled=false` / `gateway.enabled=false`,链也在对应 Provider 的 Register 阶段创建 — `HttpProvider` / `GatewayProvider` 必须 Use(可以 disabled),中间件 Provider 的 Setup 才能拿到链。注意中间件包装的是整个 server handler,pprof 等挂在 http mux 上的路由同样会被包裹。
+> `MiddlewareChain` 与 `InterceptorChain` 同理:链在第一次 `MustGetHttpMiddlewareChain` / `MustGetGatewayMiddlewareChain` 时创建,与 `HttpProvider` / `GatewayProvider` 是否注册、是否 enabled 无关。注意中间件包装的是整个 server handler,pprof 等挂在 http mux 上的路由同样会被包裹。
 
 ### E. 注册中心(按需)
 
 | # | Provider | 说明 |
 |---|---|---|
-| 27 | `RegistryProvider` | `Setup` 阶段读 `MustGetGrpcListener` 的实际端口注册当前实例。同时全局注册 `redis://` resolver,供 client 端 `grpc.NewClient("redis:///<service>")` 解析 |
+| 27 | `RegistryProvider` | `Setup` 读 `MustGetGrpcListener` 的实际端口注册当前实例,必须在 `GrpcProvider` 之后。同时全局注册 `redis://` resolver,供 client 端 `grpc.NewClient("redis:///<service>")` 解析 |
 
 ---
 
@@ -106,14 +111,14 @@ Recovery → AccessLog → Error → RateLimit → Validate → Token → 业务
 (最外层)                                                  (最内层)
 ```
 
-`Use` 顺序 = 链表追加顺序 = 拦截器外→内执行顺序。原文见 `provider/interceptor.go:13`。
+`Use` 顺序 = 链表追加顺序 = 拦截器外→内执行顺序。原文见 `provider/interceptor.go`。
 
 ### HTTP 中间件链
 
-HTTP 侧的对应机制是 `MiddlewareChain`(权威定义 `provider/middleware.go`),同样 **Use 顺序 = 外层执行顺序**。中间件 Provider 在自己的 Setup 中取出对应命名链追加,必须 Use 在 `HttpProvider` / `GatewayProvider` 之前:
+HTTP 侧的对应机制是 `MiddlewareChain`(权威定义 `provider/middleware.go`),同样 **Use 顺序 = 外层执行顺序**。中间件 Provider 在自己的 Setup 中取出对应命名链追加,必须注册在 `HttpProvider` / `GatewayProvider` 之前:
 
 ```go
-// 某中间件 Provider 的 Setup —— 必须 Use 在 GatewayProvider 之前
+// 某中间件 Provider 的 Setup —— 必须注册在 GatewayProvider 之前
 chain := provider.MustGetGatewayMiddlewareChain(ctx)
 chain.Use(func(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -494,7 +499,7 @@ dbcache:
 
 ### ValidateProvider / RecoveryProvider / ErrorProvider
 
-无 yaml 配置,`App.Use` 后注册即生效。`RecoveryProvider.Setup` 依赖 `MustGetNotifier`,所以必须排在 `NotifyProvider` 之后。
+无 yaml 配置,注册即生效。`RecoveryProvider.Setup` 依赖 `MustGetNotifier`(会先把 `NotifyProvider` 拉起)。
 
 ### MessageProvider — `message.email.*` / `message.sms.*`
 
@@ -551,14 +556,14 @@ message:
 //go:embed migrations
 var migrationsFS embed.FS
 
-app.Use(provider.NewMigrationProvider(migrationsFS))
+c.Instance(provider.NewMigrationProvider(migrationsFS))
 ```
 
-`fsys` 顶层每个目录名必须对应已配置的 `database.<name>`,否则 Register 阶段直接报错。反向缺失(database 配了但还没写迁移)允许。
+`fsys` 顶层每个目录名必须对应已配置的 `database.<name>`,否则 Setup 直接报错。反向缺失(database 配了但还没写迁移)允许。
 
 ### BuildProvider
 
-无配置,`Register` 阶段读 `runtime/debug.ReadBuildInfo()` 生成 `*BuildInfo` 注入容器。go build 时自动捕获 VCS 标签 / commit / dirty 状态。
+无配置,Setup 读 `runtime/debug.ReadBuildInfo()` 生成 `*BuildInfo` 注入容器。go build 时自动捕获 VCS 标签 / commit / dirty 状态。
 
 ---
 
@@ -582,69 +587,55 @@ import (
 var configsFS embed.FS // 可选;若用磁盘 ./configs 直接省略
 
 func main() {
-    app := ioc.New(ioc.WithShutdownTimeout(30 * time.Second))
+    c := ioc.New(ioc.WithShutdownTimeout(30 * time.Second))
 
-    // A. 基础(Build 必须在 Trace/Metrics/Notify 之前;Metrics/Trace 必须在 Redis/DB 之前)
-    must(app.Use(
-        &provider.BuildProvider{},
-        provider.NewConfigProvider("myapp"),
-        &provider.LoggerProvider{},
-        &provider.MetricsProvider{},
-        &provider.TraceProvider{},
-        &provider.NotifyProvider{},
-    ))
+    // A. 基础(Logger 靠前才能尽早生效;Notify 靠前才会在收尾时最后发 "stopped")
+    c.Instance(&provider.BuildProvider{}).
+        Instance(provider.NewConfigProvider("myapp")).
+        Instance(&provider.LoggerProvider{}).
+        Instance(&provider.MetricsProvider{}).
+        Instance(&provider.TraceProvider{}).
+        Instance(&provider.NotifyProvider{})
 
-    // B. 数据层(JobQueue / ReliableQueue / Dbcache 必须在 Redis 之后)
-    must(app.Use(
-        &provider.RedisProvider{},
-        &provider.DatabaseProvider{},
-        &provider.LockProvider{},
-        &provider.CronProvider{},
-        &provider.JobQueueProvider{},
-        &provider.ReliableQueueProvider{},
-        &provider.DbcacheProvider{},
-        &provider.MessageProvider{},
-    ))
+    // B. 数据层(彼此之间的依赖由容器按需拉起,顺序不限)
+    c.Instance(&provider.RedisProvider{}).
+        Instance(&provider.DatabaseProvider{}).
+        Instance(&provider.LockProvider{}).
+        Instance(&provider.CronProvider{}).
+        Instance(&provider.JobQueueProvider{}).
+        Instance(&provider.ReliableQueueProvider{}).
+        Instance(&provider.DbcacheProvider{}).
+        Instance(&provider.MessageProvider{})
 
     // C. 拦截器(顺序 = 链外层→内层,**必须放在 GrpcProvider 之前**)
-    must(app.Use(
-        &provider.RecoveryProvider{},
-        &provider.AccessLogProvider{},
-        &provider.ErrorProvider{},
-        &provider.RateLimitProvider{},
-        &provider.ValidateProvider{},
-        &provider.TokenProvider{},
-    ))
+    c.Instance(&provider.RecoveryProvider{}).
+        Instance(&provider.AccessLogProvider{}).
+        Instance(&provider.ErrorProvider{}).
+        Instance(&provider.RateLimitProvider{}).
+        Instance(&provider.ValidateProvider{}).
+        Instance(&provider.TokenProvider{})
 
-    // D. 服务端
-    must(app.Use(
-        &provider.GrpcProvider{},
-        &provider.HttpProvider{},
-        &provider.PprofProvider{},
-        &provider.GatewayProvider{},
-    ))
+    // D. 服务端(Pprof 必须在 Http 之后:读写链的 Provider 不会被提前拉起)
+    c.Instance(&provider.GrpcProvider{}).
+        Instance(&provider.HttpProvider{}).
+        Instance(&provider.PprofProvider{}).
+        Instance(&provider.GatewayProvider{})
 
     // E. 注册中心,Setup 时读 grpc listener 的实际端口
-    must(app.Use(&provider.RegistryProvider{}))
+    c.Instance(&provider.RegistryProvider{})
 
-    // 业务 Provider 自己实现 Provider 接口,在 Setup 阶段注册 gRPC service
-    must(app.Use(&MyBusinessProvider{}))
+    // 业务 Provider 放最后:要用 grpc server / http mux,必须排在 D 之后
+    c.Instance(&MyBusinessProvider{})
 
-    if err := app.Run(context.Background(), nil); err != nil {
+    if err := c.Run(context.Background()); err != nil {
         log.Fatal().Err(err).Msg("app exited with error")
     }
 }
 
-func must(err error) {
-    if err != nil {
-        panic(err)
-    }
-}
-
-// MyBusinessProvider 示意:在 Setup 拿到 grpc.Server 注册 service 实现
+// MyBusinessProvider 示意:在 Setup 拿到 grpc.Server 注册 service 实现。
+// 只需要实现用得到的生命周期方法,这里只有 Setup。
 type MyBusinessProvider struct{}
 
-func (p *MyBusinessProvider) Register(ctx context.Context) error { return nil }
 func (p *MyBusinessProvider) Setup(ctx context.Context) error {
     srv := provider.MustGetGrpcServer(ctx)
     pb.RegisterMyServiceServer(srv, &myServiceImpl{
@@ -656,22 +647,29 @@ func (p *MyBusinessProvider) Setup(ctx context.Context) error {
 }
 ```
 
-### 5.2 CLI 子命令(fn 模式)
+同一个 Provider 类型只能注册一次(重复注册会 panic)。业务代码也可以不写 Provider,直接用构造函数注入:
 
-`fn != nil` 时跳过 Server,`fn` 跑完即退出。常用于 migrate / seed / 一次性脚本:
+```go
+// 参数按类型从容器解析;只有一个 *bun.DB 绑定时不用指定名字
+func NewUserService(db *bun.DB, tm token.Manager) *UserService { ... }
+
+c.Provide(NewUserService) // 构造函数参数直接按类型取,不会拉起 Provider,所以要放在 DatabaseProvider / TokenProvider 之后
+```
+
+### 5.2 CLI 子命令(Exec 模式)
+
+`c.Exec(ctx, fn)` 只做 `Boot → fn → Shutdown`,不启动 Server,`fn` 跑完即退出。常用于 migrate / seed / 一次性脚本:
 
 ```go
 func main() {
-    app := ioc.New()
-    must(app.Use(
-        &provider.BuildProvider{},
-        provider.NewConfigProvider("myapp"),
-        &provider.LoggerProvider{},
-        &provider.DatabaseProvider{},
-        provider.NewMigrationProvider(migrationsFS),
-    ))
+    c := ioc.New()
+    c.Instance(&provider.BuildProvider{}).
+        Instance(provider.NewConfigProvider("myapp")).
+        Instance(&provider.LoggerProvider{}).
+        Instance(&provider.DatabaseProvider{}).
+        Instance(provider.NewMigrationProvider(migrationsFS))
 
-    if err := app.Run(context.Background(), func(ctx context.Context) error {
+    if err := c.Exec(context.Background(), func(ctx context.Context) error {
         set := provider.MustGetMigrationSet(ctx)
         db := provider.MustGetDb(ctx, "default")
         return set.Migrate(ctx, "default", db) // 假定 migration 包提供此方法
@@ -753,11 +751,12 @@ notify:
 | `*provider.BuildInfo` | `provider.MustGetBuildInfo(ctx)` | |
 | `*grpc.Server` | `provider.MustGetGrpcServer(ctx)` | grpc.enabled=true 才存在 |
 | `net.Listener`(grpc) | `provider.MustGetGrpcListener(ctx)` | 同上 |
+| `*provider.InterceptorChain` | `provider.MustGetInterceptorChain(ctx)` | 首次获取时创建,与 GrpcProvider 是否注册 / enabled 无关 |
 | `*http.ServeMux` | `provider.MustGetHttpMux(ctx)` | http.enabled=true 才存在 |
-| `*provider.MiddlewareChain`(http) | `provider.MustGetHttpMiddlewareChain(ctx)` | HttpProvider 已 Use 即存在,与 enabled 无关 |
+| `*provider.MiddlewareChain`(http) | `provider.MustGetHttpMiddlewareChain(ctx)` | 首次获取时创建,与 HttpProvider 是否注册 / enabled 无关 |
 | `*runtime.ServeMux`(gateway) | `provider.MustGetGatewayMux(ctx)` | gateway.enabled=true 才存在 |
 | `*grpc.ClientConn`(gateway) | `provider.MustGetGatewayConn(ctx)` | 同上 |
-| `*provider.MiddlewareChain`(gateway) | `provider.MustGetGatewayMiddlewareChain(ctx)` | GatewayProvider 已 Use 即存在,与 enabled 无关 |
+| `*provider.MiddlewareChain`(gateway) | `provider.MustGetGatewayMiddlewareChain(ctx)` | 首次获取时创建,与 GatewayProvider 是否注册 / enabled 无关 |
 | `TcpHandler` | `provider.GetTcpHandler(ctx)` / `provider.MustSetTcpHandler(ctx, h)` | tcp.enabled=true 时业务方注入 |
 | `redis.UniversalClient` | `provider.MustGetRedis(ctx, "default")` | 实例名按 yaml |
 | `*bun.DB` | `provider.MustGetDb(ctx, "default")` | 同上 |
@@ -773,23 +772,45 @@ notify:
 | `notify.Notifier` | `provider.MustGetNotifier(ctx)` | 始终存在,空配置走 noop |
 | `*metricSdk.MeterProvider` | `provider.MustGetMeterProvider(ctx)` | metrics.enabled=true |
 | `*traceSdk.TracerProvider` | `provider.MustGetTracerProvider(ctx)` | trace.enabled=true |
-| `*migration.Set` | `provider.MustGetMigrationSet(ctx)` | 仅当 `NewMigrationProvider(...)` 已 Use |
+| `*migration.Set` | `provider.MustGetMigrationSet(ctx)` | 仅当 `NewMigrationProvider(...)` 已注册 |
 
 每个 `MustGet*` 都有对应 `Get*` 变体,返回 `(T, error)` 而非 panic,适合启动后动态判断的场景。
+
+业务自己的实例直接用容器的泛型方法存取:
+
+```go
+c := ioc.FromContext(ctx)              // Setup / Serve / Shutdown / Exec 的 ctx
+c.Instance(svc)                        // 按声明类型绑定
+c.Instance[UserStore](pgStore, "main") // 显式绑定为接口类型,并命名
+svc := c.MustGet[*UserService]()
+store, err := c.Get[UserStore]("main")
+```
+
+业务 Provider 如果也在 Setup 里绑定产物,给它写访问函数时用 `GetFrom[T, Owner]`,取的时候就不依赖注册顺序:
+
+```go
+// 先确保 *UserProvider 已 Setup(没注册则跳过),再取 *UserService
+func MustGetUserService(ctx context.Context) *UserService {
+    return ioc.FromContext(ctx).MustGetFrom[*UserService, *UserProvider]()
+}
+```
+
+前提是 `UserProvider.Setup` 的结果与执行时机无关;如果它要往拦截器链 / 中间件链上加东西,就别用 `GetFrom`,让调用方排在它后面。
 
 ---
 
 ## 7. 常见坑
 
-- **拦截器 Provider 必须在 GrpcProvider 之前 Use**:`InterceptorChain.Use` 是 Setup 阶段的 side effect,Setup 按 Use 顺序跑;`GrpcProvider.Setup` 读 chain 构造 server。如果拦截器 Provider 排在 GrpcProvider 之后,Grpc 拿到的 chain 是空的,所有拦截器丢失。**6 个拦截器内部顺序也必须严格按链外→内**:`Recovery → AccessLog → Error → RateLimit → Validate → Token`
-- **HTTP 中间件 Provider 必须在 HttpProvider/GatewayProvider 之前 Use**:`MiddlewareChain.Use` 是 Setup 阶段的 side effect;两个 Provider 的 Setup 读链包装 handler,之后追加的中间件被**静默丢弃**。链在 Register 阶段创建,即使 `enabled=false` 也要 Use 对应 Provider,否则 `MustGet*MiddlewareChain` panic
+- **拦截器 Provider 必须注册在 GrpcProvider 之前**:`InterceptorChain.Use` 是 Setup 里的 side effect,Setup 按注册顺序跑;`GrpcProvider.Setup` 读 chain 构造 server。如果拦截器 Provider 排在 GrpcProvider 之后,Grpc 拿到的 chain 是空的,所有拦截器丢失。**6 个拦截器内部顺序也必须严格按链外→内**:`Recovery → AccessLog → Error → RateLimit → Validate → Token`
+- **HTTP 中间件 Provider 必须注册在 HttpProvider/GatewayProvider 之前**:`MiddlewareChain.Use` 是 Setup 里的 side effect;两个 Provider 的 Setup 读链包装 handler,之后追加的中间件被**静默丢弃**
 - **`enabled=false` 与 `MustGet`**:`CronProvider`/`JobQueueProvider`/`ReliableQueueProvider`/`LockProvider` 等关闭时不向容器注入实例,业务方调 `MustGet` 直接 panic。这是有意为之 —— 关闭某能力时不应允许业务方依赖它
 - **`viper.GetBool` / `GetInt` 在键缺失时返回零值**:对默认值非零的开关(`token.refresh_rotation` 默认 true、`lock.retry` 默认非零)必须用 `v.IsSet(...)` 守卫,否则会被误关
-- **Metrics / Trace 时序**:启用自动 instrumentation 时,必须 Use 在 Redis/Database/Gateway 之前。后三者的 Register 阶段可能挂 `redisotel.InstrumentTracing` / `bunotel.NewQueryHook` / `otelgrpc.NewClientHandler`,需要全局 MeterProvider/TracerProvider 已就绪。`GrpcProvider` 的 otelgrpc handler 在 Setup 阶段才装,顺序无强约束(Setup 永远晚于所有 Register)
-- **JobQueue / ReliableQueue / Dbcache(redis|tiered)必须在 Redis 之后**:它们在 Register 阶段就调 `(Must)GetRedis`,所以必须排在 RedisProvider 之后 Use。Dbcache 的 `memory` 后端无此约束
-- **InterceptorChain 总要 Use**:即使不开 gRPC,`GrpcProvider` 也要 Use(可以 `grpc.enabled=false`),它的 Register 阶段创建 chain。否则拦截器 Provider 在 Setup 时拿不到 chain
+- **Metrics / Trace 时序**:forge 内挂 OTel hook 的 Provider(Redis/Database/Grpc/Gateway/队列)会在 Setup 里先把 `MetricsProvider` / `TraceProvider` 拉起,不用管顺序。业务代码若在自己的 Setup 里直接用全局 tracer / meter,仍应排在它们之后
+- **哪些依赖与顺序无关,哪些不是**:`provider.MustGetXxx(ctx)` 会先把产出该实例的 Provider 拉起,所以 Config / Build / Redis / Database / Notify / Lock / 队列 / Dbcache 等之间不用排顺序。例外是读写链的 5 个 Provider(Grpc / Http / Gateway / Token / RateLimit):`MustGetGrpcServer` / `MustGetGrpcListener` / `MustGetHttpMux` / `MustGetGatewayMux` / `MustGetGatewayConn` / `MustGetTokenManager` / `MustGetRateLimiter` 不会拉起它们(提前 Setup 会静默丢拦截器或打乱链顺序),调用方必须排在它们之后,否则启动报 `ioc: binding not found: <类型>`。用 `c.Provide(构造函数)` 注入的参数同样只按类型取、不拉起
+- **自定义 message 后端的注册时机**:`RegisterSmsSender` / `RegisterEmailSender` 必须早于 `MessageProvider.Setup` — 放在包级 `init()` 或 `main` 里 `c.Run` 之前。不要放进业务 Provider 的 Setup:`MessageProvider` 可能被别处的 `MustGetMessageManager` 提前拉起
+- **没有 Server 时 `Run` 立即返回**:`c.Run` 在全部 Serve 返回后就收尾。`NotifyProvider.Serve` 会阻塞到收到信号,所以注册了它的应用始终常驻;没注册任何常驻 Server 的一次性程序请用 `c.Exec`
 - **`grpc.addr=":0"` + Registry**:支持。RegistryProvider 从 listener 读实际端口,而不是从 `grpc.addr` 字符串解析
-- **`Shutdown` LIFO**:`NotifyProvider` 排第一所以最后 Shutdown,正好给业务 server 关停后再发 "stopped" 通知 — 不要把 `NotifyProvider` 改放后面
+- **`Shutdown` 逆序**:`NotifyProvider` 排在最前面一批所以最后 Shutdown,正好给业务 server 关停后再发 "stopped" 通知 — 不要把 `NotifyProvider` 改放后面
 
 ---
 
@@ -803,7 +824,7 @@ go doc github.com/toolbelts/forge/provider | head
 
 源码导航:
 
-- 拦截器链顺序权威定义 — `provider/interceptor.go:13`
+- 拦截器链顺序权威定义 — `provider/interceptor.go`
 - HTTP 中间件链编排约定 — `provider/middleware.go`
-- 生命周期阶段定义 — `ioc/app.go`,`ioc/doc.go`
+- 容器与生命周期定义 — `ioc/ioc.go`
 - 各 Provider 的 yaml 键覆盖率 — 逐文件搜 `v.GetXxx(`

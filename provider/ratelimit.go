@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"cmp"
 	"context"
 
 	"github.com/rs/zerolog/log"
@@ -22,32 +23,19 @@ const ratelimitDefaultRedisName = "default"
 //
 // 流式 RPC:本期不挂载流式拦截器,一次性 Allow 与流式语义不匹配(参考 ValidateProvider 的取舍)。
 type RateLimitProvider struct {
-	enabled bool
-	rl      *ratelimit.RedisRateLimiter
-}
-
-// Register 读 ratelimit.enabled。disabled 时 Setup/Shutdown 都直接跳过,不占用 Redis 资源。
-func (p *RateLimitProvider) Register(ctx context.Context) error {
-	v := MustGetViper(ctx)
-	p.enabled = v.GetBool("ratelimit.enabled")
-	if !p.enabled {
-		log.Ctx(ctx).Info().Str("provider", "ratelimit").Msg("ratelimit disabled, skip")
-	}
-	return nil
+	rl *ratelimit.RedisRateLimiter
 }
 
 // Setup 取出 Redis 客户端并构造 RedisRateLimiter(启动加载 + 后台周期 reload),把一元拦截器加进 chain。
-// 必须排在 RedisProvider 之后,GetRedis 才能取到客户端。
+// ratelimit.enabled=false 时直接跳过,不占用 Redis 资源。
 func (p *RateLimitProvider) Setup(ctx context.Context) error {
-	if !p.enabled {
+	v := MustGetViper(ctx)
+	if !v.GetBool("ratelimit.enabled") {
+		log.Ctx(ctx).Info().Str("provider", "ratelimit").Msg("ratelimit disabled, skip")
 		return nil
 	}
 
-	v := MustGetViper(ctx)
-	redisName := v.GetString("ratelimit.redis")
-	if redisName == "" {
-		redisName = ratelimitDefaultRedisName
-	}
+	redisName := cmp.Or(v.GetString("ratelimit.redis"), ratelimitDefaultRedisName)
 
 	rdb, err := GetRedis(ctx, redisName)
 	if err != nil {
@@ -70,9 +58,9 @@ func (p *RateLimitProvider) Setup(ctx context.Context) error {
 		return err
 	}
 	p.rl = rl
-	ioc.MustInstance(ctx, p.rl)
+	ioc.FromContext(ctx).Instance(p.rl)
 
-	chain := ioc.MustGet[*InterceptorChain](ctx)
+	chain := MustGetInterceptorChain(ctx)
 	chain.Use(rateLimitUnaryInterceptor(p.rl))
 
 	log.Ctx(ctx).Info().
@@ -118,10 +106,10 @@ func rateLimitUnaryInterceptor(rl *ratelimit.RedisRateLimiter) grpc.UnaryServerI
 // MustGetRateLimiter 从容器获取限速器,缺失时 panic。
 // 业务方在 admin handler 中调 SetRule/DeleteRule 动态调整规则。
 func MustGetRateLimiter(ctx context.Context) *ratelimit.RedisRateLimiter {
-	return ioc.MustGet[*ratelimit.RedisRateLimiter](ctx)
+	return ioc.FromContext(ctx).MustGet[*ratelimit.RedisRateLimiter]()
 }
 
 // GetRateLimiter 从容器获取限速器。
 func GetRateLimiter(ctx context.Context) (*ratelimit.RedisRateLimiter, error) {
-	return ioc.Get[*ratelimit.RedisRateLimiter](ctx)
+	return ioc.FromContext(ctx).Get[*ratelimit.RedisRateLimiter]()
 }

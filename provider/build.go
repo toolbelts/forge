@@ -70,11 +70,11 @@ func (b *BuildInfo) InstanceId() string {
 	}
 }
 
-// BuildProvider 构建信息提供者，在 Register 阶段读取 VCS 信息并注册到容器。
+// BuildProvider 构建信息提供者，在 Setup 中读取 VCS 信息并注册到容器。
 type BuildProvider struct{}
 
-// Register 读取 runtime/debug 中的构建信息并绑定到容器。
-func (p *BuildProvider) Register(ctx context.Context) error {
+// Setup 读取 runtime/debug 中的构建信息并绑定到容器。
+func (p *BuildProvider) Setup(ctx context.Context) error {
 	bi := &BuildInfo{}
 	if info, ok := debug.ReadBuildInfo(); ok {
 		bi.GoVersion = info.GoVersion
@@ -94,7 +94,7 @@ func (p *BuildProvider) Register(ctx context.Context) error {
 		}
 	}
 
-	ioc.MustInstance(ctx, bi)
+	ioc.FromContext(ctx).Instance(bi)
 
 	ev := log.Info().
 		Str("version", bi.Version).
@@ -109,12 +109,7 @@ func (p *BuildProvider) Register(ctx context.Context) error {
 	return nil
 }
 
-// Setup 无操作。
-func (p *BuildProvider) Setup(ctx context.Context) error {
-	return nil
-}
-
 // MustGetBuildInfo 从容器获取构建信息，缺失时 panic。
 func MustGetBuildInfo(ctx context.Context) *BuildInfo {
-	return ioc.MustGet[*BuildInfo](ctx)
+	return ioc.FromContext(ctx).MustGetFrom[*BuildInfo, *BuildProvider]()
 }

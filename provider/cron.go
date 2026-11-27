@@ -11,7 +11,7 @@ import (
 	"github.com/toolbelts/forge/ioc"
 )
 
-// CronProvider 定时任务提供者:Register 阶段构造 *cron.Cron 并注入容器,
+// CronProvider 定时任务提供者:Setup 中构造 *cron.Cron 并注入容器,
 // 业务方在自己的 Setup 中通过 MustGetCron(ctx) 拿到调度器再 AddJob。
 //
 // 行为约定:
@@ -19,7 +19,7 @@ import (
 //     这是有意为之 —— 关闭定时任务时不应允许业务方依赖它
 //   - 6 字段表达式(秒级)+ 全局 SkipIfStillRunning + Recover,详见 pkg/cron
 //   - cron.timezone 解析失败立即返回错误,避免 prod 时区错配跑错时间
-//   - Serve 仅在 enabled 时启动调度器并阻塞到 ctx 取消
+//   - Serve 仅在 enabled 时启动调度器并阻塞到 ctx 取消,否则直接返回
 //   - Shutdown 通过 cron.Stop() 等待运行中任务收尾,超时阈值 cron.shutdown_timeout
 type CronProvider struct {
 	enabled         bool
@@ -28,8 +28,8 @@ type CronProvider struct {
 	shutdownTimeout time.Duration
 }
 
-// Register 读 cron.* 配置,构造调度器并注入容器。enabled=false 静默跳过。
-func (p *CronProvider) Register(ctx context.Context) error {
+// Setup 读 cron.* 配置,构造调度器并注入容器。enabled=false 静默跳过。
+func (p *CronProvider) Setup(ctx context.Context) error {
 	v := MustGetViper(ctx)
 	p.enabled = v.GetBool("cron.enabled")
 	if !p.enabled {
@@ -50,7 +50,7 @@ func (p *CronProvider) Register(ctx context.Context) error {
 	p.shutdownTimeout = v.GetDuration("cron.shutdown_timeout")
 
 	p.cron = gpcron.New(loc)
-	ioc.MustInstance(ctx, p.cron)
+	ioc.FromContext(ctx).Instance(p.cron)
 
 	log.Ctx(ctx).Info().
 		Str("provider", "cron").
@@ -60,15 +60,9 @@ func (p *CronProvider) Register(ctx context.Context) error {
 	return nil
 }
 
-// Setup 无操作。业务方在自己的 Setup 里 MustGetCron(ctx).AddJob(...)。
-func (p *CronProvider) Setup(ctx context.Context) error {
-	return nil
-}
-
-// Serve 启动调度器并阻塞到 ctx 取消。enabled=false 时仅 wait,不参与调度。
+// Serve 启动调度器并阻塞到 ctx 取消。enabled=false 时直接返回,不参与调度。
 func (p *CronProvider) Serve(ctx context.Context) error {
 	if !p.enabled {
-		<-ctx.Done()
 		return nil
 	}
 	p.cron.Start(ctx)
@@ -114,10 +108,10 @@ func (p *CronProvider) Shutdown(ctx context.Context) error {
 
 // GetCron 从容器获取 *cron.Cron。
 func GetCron(ctx context.Context) (*gpcron.Cron, error) {
-	return ioc.Get[*gpcron.Cron](ctx)
+	return ioc.FromContext(ctx).GetFrom[*gpcron.Cron, *CronProvider]()
 }
 
 // MustGetCron 从容器获取 *cron.Cron,缺失时 panic(通常是 cron.enabled=false 时被业务方误用)。
 func MustGetCron(ctx context.Context) *gpcron.Cron {
-	return ioc.MustGet[*gpcron.Cron](ctx)
+	return ioc.FromContext(ctx).MustGetFrom[*gpcron.Cron, *CronProvider]()
 }

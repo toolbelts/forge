@@ -10,7 +10,6 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/toolbelts/forge/errkit"
-	"github.com/toolbelts/forge/ioc"
 	"github.com/toolbelts/forge/notify"
 )
 
@@ -18,15 +17,12 @@ import (
 // 必须排在 ErrorProvider/ValidateProvider 之前注册（最外层），才能 recover 到内层所有 panic。
 type RecoveryProvider struct{}
 
-// Register 无前置依赖。
-func (p *RecoveryProvider) Register(ctx context.Context) error { return nil }
-
 // Setup 把一元 + 流式 panic 恢复拦截器加进 chain。
 func (p *RecoveryProvider) Setup(ctx context.Context) error {
-	chain := ioc.MustGet[*InterceptorChain](ctx)
+	chain := MustGetInterceptorChain(ctx)
 	hostname, _ := os.Hostname()
 	deps := recoveryDeps{
-		notifier: ioc.MustGet[notify.Notifier](ctx),
+		notifier: MustGetNotifier(ctx),
 		hostname: hostname,
 		appName:  string(MustGetAppName(ctx)),
 	}

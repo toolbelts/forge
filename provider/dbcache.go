@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -20,7 +21,7 @@ const dbcacheDefaultRedisName = "default"
 
 // DbcacheProvider 数据库缓存提供者。
 //
-// 编排约定:依赖 RedisProvider(redis / tiered 后端时);排在 RedisProvider 之后、业务 Provider 之前。
+// 编排约定:依赖 RedisProvider(redis / tiered 后端时),取客户端时会先把它拉起,两者的注册顺序不限。
 //
 // 行为约定:
 //   - 扫描 dbcache.<name> 配置,为每个 name 构造对应类型的 Store 并按 name 注入容器。
@@ -35,25 +36,22 @@ type DbcacheProvider struct {
 	stores map[string]dbcache.Store
 }
 
-// Register 扫 dbcache.* 配置,为每个 name 构造 Store 并以 dbcache.Store 类型注入容器。
-func (p *DbcacheProvider) Register(ctx context.Context) error {
+// Setup 扫 dbcache.* 配置,为每个 name 构造 Store 并以 dbcache.Store 类型注入容器。
+func (p *DbcacheProvider) Setup(ctx context.Context) error {
 	v := MustGetViper(ctx)
 	cfgMap := v.GetStringMap("dbcache")
 	p.stores = make(map[string]dbcache.Store, len(cfgMap))
 
 	for name := range cfgMap {
 		prefix := "dbcache." + name
-		storeType := v.GetString(prefix + ".store")
-		if storeType == "" {
-			storeType = "memory"
-		}
+		storeType := cmp.Or(v.GetString(prefix+".store"), "memory")
 
 		store, err := buildDbcacheStore(ctx, v, prefix, storeType)
 		if err != nil {
 			return fmt.Errorf("dbcache [%s]: %w", name, err)
 		}
 
-		ioc.MustInstanceNamed(ctx, name, store)
+		ioc.FromContext(ctx).Instance(store, name)
 		p.stores[name] = store
 
 		log.Ctx(ctx).Info().
@@ -63,11 +61,6 @@ func (p *DbcacheProvider) Register(ctx context.Context) error {
 			Msg("dbcache store registered")
 	}
 
-	return nil
-}
-
-// Setup 无操作。Cache 由业务方自行构造。
-func (p *DbcacheProvider) Setup(ctx context.Context) error {
 	return nil
 }
 
@@ -130,10 +123,7 @@ func buildDbcacheRedisStore(ctx context.Context, v *viper.Viper, prefix string) 
 
 // resolveDbcacheRedis 抽出 redis/tiered 共用的"按 redis 名取 client + 读 key_prefix"逻辑。
 func resolveDbcacheRedis(ctx context.Context, v *viper.Viper, prefix string) (redis.UniversalClient, string, error) {
-	redisName := v.GetString(prefix + ".redis")
-	if redisName == "" {
-		redisName = dbcacheDefaultRedisName
-	}
+	redisName := cmp.Or(v.GetString(prefix+".redis"), dbcacheDefaultRedisName)
 	rdb, err := GetRedis(ctx, redisName)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve redis %q: %w", redisName, err)
@@ -143,10 +133,10 @@ func resolveDbcacheRedis(ctx context.Context, v *viper.Viper, prefix string) (re
 
 // GetDbcacheStore 从容器获取指定名称的 dbcache Store。
 func GetDbcacheStore(ctx context.Context, name string) (dbcache.Store, error) {
-	return ioc.GetNamed[dbcache.Store](ctx, name)
+	return ioc.FromContext(ctx).GetFrom[dbcache.Store, *DbcacheProvider](name)
 }
 
 // MustGetDbcacheStore 从容器获取指定名称的 dbcache Store,缺失时 panic。
 func MustGetDbcacheStore(ctx context.Context, name string) dbcache.Store {
-	return ioc.MustGetNamed[dbcache.Store](ctx, name)
+	return ioc.FromContext(ctx).MustGetFrom[dbcache.Store, *DbcacheProvider](name)
 }

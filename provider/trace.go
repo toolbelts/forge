@@ -22,9 +22,9 @@ import (
 // TraceProvider OTel 链路追踪提供者，使用 OTLP HTTP 协议把 span 上报到 collector。
 //
 // 编排约定：
-//   - 排在 LoggerProvider 之后、所有依赖 trace 的 Provider 之前。
-//     开启 trace instrumentation 的 Provider 会在 Register/Setup 阶段装 trace hook,
-//     必须保证此时全局 TracerProvider 已就绪，否则 instrumentation 拿到的是 noop。
+//   - 排在 LoggerProvider 之后。forge 内会装 trace hook 的 Provider(Redis/Database/Grpc/Gateway)
+//     在 Setup 里通过 needOtel 先把本 Provider 拉起,保证全局 TracerProvider 已就绪,与注册顺序无关;
+//     业务代码若在自己的 Setup 里直接用全局 tracer,仍应排在本 Provider 之后。
 //   - trace.enabled=false 时全局保留 OTel 默认的 noop tracer,且默认关闭自动 instrumentation。
 //
 // Resource 字段：
@@ -38,10 +38,10 @@ type TraceProvider struct {
 	shutdownTimeout time.Duration
 }
 
-// Register 读 trace.* 配置；启用时构建 otlphttp exporter + TracerProvider + 全局 Propagator，
+// Setup 读 trace.* 配置；启用时构建 otlphttp exporter + TracerProvider + 全局 Propagator，
 // 并把 *traceSdk.TracerProvider 注入容器供测试或外部插桩使用。
 // 未启用时不设 TracerProvider，OTel 自动回落到 noop，所有 instrumentation 不产生 span。
-func (p *TraceProvider) Register(ctx context.Context) error {
+func (p *TraceProvider) Setup(ctx context.Context) error {
 	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
 		log.Error().Err(err).Msg("otel internal error")
 	}))
@@ -105,17 +105,12 @@ func (p *TraceProvider) Register(ctx context.Context) error {
 		p.shutdownTimeout = 5 * time.Second
 	}
 
-	ioc.MustInstance(ctx, p.tp)
+	ioc.FromContext(ctx).Instance(p.tp)
 	log.Ctx(ctx).Info().
 		Str("endpoint", endpoint).
 		Float64("sample_ratio", ratio).
 		Str("env", env).
 		Msg("trace exporter ready")
-	return nil
-}
-
-// Setup 无操作。
-func (p *TraceProvider) Setup(ctx context.Context) error {
 	return nil
 }
 
@@ -136,5 +131,5 @@ func (p *TraceProvider) Shutdown(ctx context.Context) error {
 // MustGetTracerProvider 从容器获取 *traceSdk.TracerProvider，缺失时 panic。
 // trace.enabled=false 时容器内不存在，业务方需自行判断是否调用。
 func MustGetTracerProvider(ctx context.Context) *traceSdk.TracerProvider {
-	return ioc.MustGet[*traceSdk.TracerProvider](ctx)
+	return ioc.FromContext(ctx).MustGetFrom[*traceSdk.TracerProvider, *TraceProvider]()
 }

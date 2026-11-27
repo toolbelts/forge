@@ -9,7 +9,6 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/toolbelts/forge/errkit"
-	"github.com/toolbelts/forge/ioc"
 )
 
 // ValidateProvider 集成 buf 的 protovalidate，在 handler 之前自动校验请求消息。
@@ -18,16 +17,13 @@ import (
 // 流式 RPC 由于校验语义不同（每条 RecvMsg 校验），本期只做一元拦截器。
 type ValidateProvider struct{}
 
-// Register 无前置依赖。
-func (p *ValidateProvider) Register(ctx context.Context) error { return nil }
-
 // Setup 创建 validator 并加进 chain。
 func (p *ValidateProvider) Setup(ctx context.Context) error {
 	v, err := protovalidate.New()
 	if err != nil {
 		return err
 	}
-	chain := ioc.MustGet[*InterceptorChain](ctx)
+	chain := MustGetInterceptorChain(ctx)
 	chain.Use(validateUnaryInterceptor(v))
 	log.Ctx(ctx).Info().Str("provider", "validate").Msg("validate interceptor registered")
 	return nil

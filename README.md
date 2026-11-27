@@ -3,7 +3,7 @@
 一组 Go 公共库,围绕 `ioc` + `provider` 提供"配置驱动的服务编排":每个目录是独立子库,可单独引入,也可由 `provider` 用 viper 配置串成完整服务。
 
 - 模块路径: `github.com/toolbelts/forge`
-- Go 版本: `1.26+`
+- Go 版本: `1.27.4+`(`ioc` 使用泛型方法)
 - 文档约定: 每个子库根目录有 `doc.go` 给出 godoc 风格说明;关于 Provider 编排见 [`provider/README.md`](./provider/README.md)
 
 ---
@@ -14,7 +14,7 @@
 
 | 库 | 一句话 |
 |---|---|
-| [`ioc`](./ioc/) | 轻量 DI 容器 + Provider 生命周期编排(Register / Setup / Serve / Shutdown 四阶段,Shutdown 走 LIFO) |
+| [`ioc`](./ioc/) | 最小 IoC 容器 + 生命周期编排:构造函数注入、泛型方法 `c.Get[T]()`,Setup / Serve / Shutdown 三个可选阶段,Shutdown 按 Setup 逆序 |
 | [`errkit`](./errkit/) | forge 与应用之间的错误契约,无 proto / 业务码依赖。中间件统一抽 `code` / `message` / `metadata`,序列化由应用注入 Encoder |
 | [`meta`](./meta/) | 请求级 ctx 元数据,桥接 gRPC incoming metadata 与 HTTP 请求字段(path / IP / UA / country),支持跨服务透传 |
 | [`migration`](./migration/) | 多 db 分组的 bun migrate 集合。从 `embed.FS` 顶层目录扫迁移,目录名匹配 `database.<name>` 配置 |
@@ -39,7 +39,7 @@
 
 | 库 | 一句话 |
 |---|---|
-| [`provider`](./provider/) | 把上述每一项封装成 `Provider`,viper 驱动配置,一行 `App.Use(...)` 即可启用 — 详见 [`provider/README.md`](./provider/README.md) |
+| [`provider`](./provider/) | 把上述每一项封装成 `Provider`,viper 驱动配置,一行 `c.Instance(...)` 即可启用 — 详见 [`provider/README.md`](./provider/README.md) |
 
 ---
 
@@ -53,20 +53,19 @@ import (
     "github.com/toolbelts/forge/provider"
 )
 
-app := ioc.New()
-_ = app.Use(
-    &provider.BuildProvider{},
-    provider.NewConfigProvider("myapp"),
-    &provider.LoggerProvider{},
-    &provider.RedisProvider{},
-    // 拦截器必须在 GrpcProvider 之前 Use
-    &provider.RecoveryProvider{},
-    &provider.ErrorProvider{},
+c := ioc.New()
+c.Instance(&provider.BuildProvider{}).
+    Instance(provider.NewConfigProvider("myapp")).
+    Instance(&provider.LoggerProvider{}).
+    Instance(&provider.NotifyProvider{}).
+    Instance(&provider.RedisProvider{}).
+    // 拦截器必须注册在 GrpcProvider 之前
+    Instance(&provider.RecoveryProvider{}).
+    Instance(&provider.ErrorProvider{}).
     // ...
-    &provider.GrpcProvider{},
+    Instance(&provider.GrpcProvider{})
     // ... 见 provider/README.md
-)
-_ = app.Run(ctx, nil)
+_ = c.Run(ctx)
 ```
 
 完整可跑示例、推荐编排顺序、yaml 配置键参考 → [`provider/README.md`](./provider/README.md)。

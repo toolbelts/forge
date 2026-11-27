@@ -10,13 +10,11 @@ import (
 
 	"github.com/grpc-ecosystem/grpc-gateway/v2/runtime"
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/viper"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/protobuf/encoding/protojson"
 
 	"github.com/toolbelts/forge/ioc"
 	"github.com/toolbelts/forge/meta"
@@ -27,9 +25,8 @@ const gatewayConnName = "gateway"
 
 // GatewayProvider grpc-gateway v2 服务提供者，根据 gateway.* 配置选择性启动并向容器注入 *runtime.ServeMux 与 *grpc.ClientConn。
 //
-// 编排：
-//   - Register: 注入命名 "gateway" 的 *MiddlewareChain；建立监听、dial gRPC 后端并构造 mux 与 server
-//   - Setup: 从 IOC 取出 chain 包装 mux；trace 提取（withTracePropagation）保持在链外最外层
+// 编排：Setup 建立监听、dial gRPC 后端并构造 mux，再用此前收集到的命名 "gateway" 的 *MiddlewareChain
+// 包装 mux 作为 server handler；trace 提取（withTracePropagation）保持在链外最外层。
 type GatewayProvider struct {
 	enabled         bool
 	listener        net.Listener
@@ -37,15 +34,17 @@ type GatewayProvider struct {
 	server          *http.Server
 	conn            *grpc.ClientConn
 	shutdownTimeout time.Duration
-	otelEnabled     bool
-	traceEnabled    bool
 }
 
-// Register 注入 *MiddlewareChain；当 gateway.enabled 为真时建立监听、dial gRPC 后端并构造 *runtime.ServeMux 与 *http.Server。
-func (p *GatewayProvider) Register(ctx context.Context) error {
-	ioc.MustInstanceNamed(ctx, gatewayMiddlewareChainName, &MiddlewareChain{})
-
-	v := ioc.MustGet[*viper.Viper](ctx)
+// Setup 当 gateway.enabled 为真时建立监听、dial gRPC 后端并构造 *runtime.ServeMux 与 *http.Server，
+// 把 mux 和反向连接注入容器。
+//
+// trace 提取保持在中间件之外的最外层，让所有中间件与业务逻辑都能拿到已接续上游 trace 的 ctx。
+// 中间件 Provider 必须注册在 GatewayProvider 之前，此后追加的中间件会被静默丢弃；
+// 业务方在它之后的 Setup 中通过 MustGetGatewayMux + MustGetGatewayConn 调 pb.RegisterXxxHandler 注册路由，
+// 路由注册时机与包装无关。
+func (p *GatewayProvider) Setup(ctx context.Context) error {
+	v := MustGetViper(ctx)
 	p.enabled = v.GetBool("gateway.enabled")
 	if !p.enabled {
 		log.Ctx(ctx).Info().Str("provider", "gateway").Msg("gateway disabled, skip register")
@@ -60,8 +59,11 @@ func (p *GatewayProvider) Register(ctx context.Context) error {
 	if endpoint == "" {
 		return fmt.Errorf("gateway grpc_endpoint is empty")
 	}
-	p.traceEnabled = traceInstrumentationEnabled(v, observabilityComponentGateway)
-	p.otelEnabled = p.traceEnabled || metricsInstrumentationEnabled(v, observabilityComponentGateway)
+	if err := needOtel(ctx); err != nil {
+		return err
+	}
+	traceEnabled := traceInstrumentationEnabled(v, observabilityComponentGateway)
+	otelEnabled := traceEnabled || metricsInstrumentationEnabled(v, observabilityComponentGateway)
 
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -72,7 +74,7 @@ func (p *GatewayProvider) Register(ctx context.Context) error {
 	dialOpts := []grpc.DialOption{
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	}
-	if p.otelEnabled {
+	if otelEnabled {
 		dialOpts = append(dialOpts, grpc.WithStatsHandler(otelgrpc.NewClientHandler()))
 	}
 	conn, err := grpc.NewClient(endpoint, dialOpts...)
@@ -88,8 +90,12 @@ func (p *GatewayProvider) Register(ctx context.Context) error {
 		runtime.WithMetadata(meta.Annotator),
 	)
 
+	handler := MustGetGatewayMiddlewareChain(ctx).Handler(p.mux)
+	if traceEnabled {
+		handler = withTracePropagation(handler)
+	}
 	p.server = &http.Server{
-		Handler:           p.mux, // 占位，Setup 阶段用 MiddlewareChain（及 trace 提取）包装后覆盖
+		Handler:           handler,
 		ReadTimeout:       v.GetDuration("gateway.read_timeout"),
 		ReadHeaderTimeout: v.GetDuration("gateway.read_header_timeout"),
 		WriteTimeout:      v.GetDuration("gateway.write_timeout"),
@@ -98,33 +104,14 @@ func (p *GatewayProvider) Register(ctx context.Context) error {
 	}
 	p.shutdownTimeout = v.GetDuration("gateway.shutdown_timeout")
 
-	ioc.MustInstance(ctx, p.mux)
-	ioc.MustInstanceNamed(ctx, gatewayConnName, p.conn)
+	ioc.FromContext(ctx).Instance(p.mux).Instance(p.conn, gatewayConnName)
 	log.Ctx(ctx).Info().Str("addr", addr).Str("grpc_endpoint", endpoint).Msg("gateway listening")
-	return nil
-}
-
-// Setup 当 enabled 时从容器取 MiddlewareChain 包装 gateway mux；trace 提取保持在中间件之外的最外层，
-// 让所有中间件与业务逻辑都能拿到已接续上游 trace 的 ctx。中间件 Provider 必须 Use 在 GatewayProvider 之前，
-// 此后追加的中间件会被静默丢弃；业务方仍在自己的 Setup 中通过 MustGetGatewayMux + MustGetGatewayConn
-// 调 pb.RegisterXxxHandler 注册路由，路由注册时机与包装无关。
-func (p *GatewayProvider) Setup(ctx context.Context) error {
-	if !p.enabled {
-		return nil
-	}
-
-	handler := MustGetGatewayMiddlewareChain(ctx).Handler(p.mux)
-	if p.traceEnabled {
-		handler = withTracePropagation(handler)
-	}
-	p.server.Handler = handler
 	return nil
 }
 
 // Serve 当 enabled 时阻塞 server.Serve；http.ErrServerClosed 视为正常退出。
 func (p *GatewayProvider) Serve(ctx context.Context) error {
 	if !p.enabled {
-		<-ctx.Done()
 		return nil
 	}
 
@@ -159,35 +146,31 @@ func (p *GatewayProvider) Shutdown(ctx context.Context) error {
 
 func gatewayJsonPb() *runtime.JSONPb {
 	return &runtime.JSONPb{
-		MarshalOptions: protojson.MarshalOptions{
-			UseProtoNames:     true,
-			UseEnumNumbers:    false,
-			EmitDefaultValues: true,
-		},
-		UnmarshalOptions: protojson.UnmarshalOptions{
-			DiscardUnknown: true,
-		},
+		UseProtoNames:     true,
+		UseEnumNumbers:    false,
+		EmitDefaultValues: true,
+		DiscardUnknown:    true,
 	}
 }
 
 // GetGatewayMux 从容器获取 *runtime.ServeMux。
 func GetGatewayMux(ctx context.Context) (*runtime.ServeMux, error) {
-	return ioc.Get[*runtime.ServeMux](ctx)
+	return ioc.FromContext(ctx).Get[*runtime.ServeMux]()
 }
 
 // MustGetGatewayMux 从容器获取 *runtime.ServeMux，缺失时 panic。
 func MustGetGatewayMux(ctx context.Context) *runtime.ServeMux {
-	return ioc.MustGet[*runtime.ServeMux](ctx)
+	return ioc.FromContext(ctx).MustGet[*runtime.ServeMux]()
 }
 
 // GetGatewayConn 从容器获取 gateway 反向连接到 gRPC 后端的 *grpc.ClientConn。
 func GetGatewayConn(ctx context.Context) (*grpc.ClientConn, error) {
-	return ioc.GetNamed[*grpc.ClientConn](ctx, gatewayConnName)
+	return ioc.FromContext(ctx).Get[*grpc.ClientConn](gatewayConnName)
 }
 
 // MustGetGatewayConn 从容器获取 gateway *grpc.ClientConn，缺失时 panic。
 func MustGetGatewayConn(ctx context.Context) *grpc.ClientConn {
-	return ioc.MustGetNamed[*grpc.ClientConn](ctx, gatewayConnName)
+	return ioc.FromContext(ctx).MustGet[*grpc.ClientConn](gatewayConnName)
 }
 
 // withTracePropagation 从 HTTP 请求头提取 W3C traceparent 注入到 ctx，

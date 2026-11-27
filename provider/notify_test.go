@@ -77,14 +77,11 @@ func TestNotifyProviderLark(t *testing.T) {
 
 	v := viper.New()
 	v.Set("notify.lark.webhook", server.URL)
-	ctx := ioc.NewContainer().WithContext(t.Context())
-	ioc.MustInstance(ctx, v)
-	ioc.MustInstance(ctx, AppName("aurax.api"))
-	ioc.MustInstance(ctx, &BuildInfo{Version: "v1"})
+	ctx := ioc.New().WithContext(t.Context())
+	ioc.FromContext(ctx).Instance(v)
+	ioc.FromContext(ctx).Instance(AppName("aurax.api"))
+	ioc.FromContext(ctx).Instance(&BuildInfo{Version: "v1"})
 	p := &NotifyProvider{}
-	if err := p.Register(ctx); err != nil {
-		t.Fatal(err)
-	}
 	if err := p.Setup(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -117,11 +114,12 @@ func TestNotifyProviderLark(t *testing.T) {
 
 // TestNotifyProviderNoop 验证没有通知渠道时依旧成功返回。
 func TestNotifyProviderNoop(t *testing.T) {
-	ctx := ioc.NewContainer().WithContext(t.Context())
-	ioc.MustInstance(ctx, viper.New())
-	ioc.MustInstance(ctx, AppName("aurax.worker"))
+	ctx := ioc.New().WithContext(t.Context())
+	ioc.FromContext(ctx).Instance(viper.New())
+	ioc.FromContext(ctx).Instance(AppName("aurax.worker"))
+	ioc.FromContext(ctx).Instance(&BuildInfo{})
 	p := &NotifyProvider{}
-	if err := p.Register(ctx); err != nil {
+	if err := p.Setup(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := MustGetNotifier(ctx).Send(ctx, "aurax feed heartbeat", "feed down"); err != nil {

@@ -9,17 +9,14 @@ import (
 	"github.com/fsnotify/fsnotify"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-	"github.com/spf13/viper"
-
-	"github.com/toolbelts/forge/ioc"
 )
 
 // LoggerProvider 日志提供者，初始化 zerolog 全局 logger 并绑定配置热重载。
 type LoggerProvider struct{}
 
-// Register 初始化 zerolog 全局 logger，并启用 viper 文件监听以热更新日志级别。
-func (p *LoggerProvider) Register(ctx context.Context) error {
-	v := ioc.MustGet[*viper.Viper](ctx)
+// Setup 初始化 zerolog 全局 logger，并启用 viper 文件监听以热更新日志级别。
+func (p *LoggerProvider) Setup(ctx context.Context) error {
+	v := MustGetViper(ctx)
 
 	zerolog.CallerMarshalFunc = shortCallerMarshalFunc
 
@@ -58,13 +55,8 @@ func (p *LoggerProvider) Register(ctx context.Context) error {
 	return nil
 }
 
-// Setup 无操作。
-func (p *LoggerProvider) Setup(ctx context.Context) error {
-	return nil
-}
-
 // shortCallerMarshalFunc 自定义 zerolog caller 短路径，保留最后两段路径。
-// 例：/usr/local/.../pkg/ioc/app.go:42 -> ioc/app.go:42
+// 例：/usr/local/.../forge/ioc/ioc.go:42 -> ioc/ioc.go:42
 func shortCallerMarshalFunc(pc uintptr, file string, line int) string {
 	short := file
 	if idx1 := strings.LastIndexByte(file, '/'); idx1 > 0 {

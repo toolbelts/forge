@@ -14,16 +14,16 @@ import (
 
 func TestRedisProviderRegistersOnlyUniversalClient(t *testing.T) {
 	server := miniredis.RunT(t)
-	ctx := ioc.NewContainer().WithContext(context.Background())
+	ctx := ioc.New().WithContext(context.Background())
 	config := viper.New()
 	config.Set("redis.default.addr", server.Addr())
 	config.Set("trace.instrumentation.redis", true)
 	config.Set("metrics.instrumentation.redis", true)
-	ioc.MustInstance(ctx, config)
+	ioc.FromContext(ctx).Instance(config)
 
 	redisProvider := &RedisProvider{}
-	if err := redisProvider.Register(ctx); err != nil {
-		t.Fatalf("register redis provider: %v", err)
+	if err := redisProvider.Setup(ctx); err != nil {
+		t.Fatalf("setup redis provider: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := redisProvider.Shutdown(ctx); err != nil {
@@ -38,7 +38,7 @@ func TestRedisProviderRegistersOnlyUniversalClient(t *testing.T) {
 	if err := client.Set(ctx, "provider:test", "ok", 0).Err(); err != nil {
 		t.Fatalf("use universal client: %v", err)
 	}
-	if _, err := ioc.GetNamed[*redis.Client](ctx, "default"); !errors.Is(err, ioc.ErrBindingNotFound) {
+	if _, err := ioc.FromContext(ctx).Get[*redis.Client]("default"); !errors.Is(err, ioc.ErrNotFound) {
 		t.Fatalf("concrete redis client lookup error = %v", err)
 	}
 }
@@ -48,17 +48,17 @@ func TestReliableQueueProviderUsesNamedUniversalClient(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	ctx := ioc.NewContainer().WithContext(context.Background())
+	ctx := ioc.New().WithContext(context.Background())
 	config := viper.New()
 	config.Set("reliablequeue.enabled", true)
 	config.Set("reliablequeue.redis", "reliable")
 	config.Set("reliablequeue.key_prefix", "provider:test:")
-	ioc.MustInstance(ctx, config)
-	ioc.MustInstanceNamed[redis.UniversalClient](ctx, "reliable", client)
+	ioc.FromContext(ctx).Instance(config)
+	ioc.FromContext(ctx).Instance[redis.UniversalClient](client, "reliable")
 
 	queueProvider := &ReliableQueueProvider{}
-	if err := queueProvider.Register(ctx); err != nil {
-		t.Fatalf("register reliablequeue provider: %v", err)
+	if err := queueProvider.Setup(ctx); err != nil {
+		t.Fatalf("setup reliablequeue provider: %v", err)
 	}
 	if _, err := GetReliableQueue(ctx); err != nil {
 		t.Fatalf("get reliablequeue: %v", err)

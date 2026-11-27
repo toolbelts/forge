@@ -19,10 +19,7 @@ import (
 //
 // 编排约定:无外部依赖(不依赖 Redis / DB / gRPC),可放在基础设施 Provider 之后、
 // 业务 Provider 之前的任意位置。
-type MessageProvider struct {
-	enabled bool
-	mgr     *message.Manager
-}
+type MessageProvider struct{}
 
 // emailProviderYaml 是 message.email.providers[] 的通用 entry 结构,
 // 字段按 type 选择性使用,unmarshal 时无关字段保留零值。
@@ -85,27 +82,19 @@ type emailTemplateYaml struct {
 	TextFile    string `mapstructure:"text_file"`
 }
 
-// Register 读取 message.email.enabled / message.sms.enabled,
-// 任一开启即视为 provider 启用,Setup 阶段才真正构建 Manager。
-func (p *MessageProvider) Register(ctx context.Context) error {
-	v := MustGetViper(ctx)
-	p.enabled = v.GetBool("message.email.enabled") || v.GetBool("message.sms.enabled")
-	if !p.enabled {
-		log.Ctx(ctx).Info().Str("provider", "message").Msg("message disabled, skip")
-	}
-	return nil
-}
-
 // Setup 从 viper 读取 providers / templates,转成 message.Option 后构造 Manager 注入容器。
+// message.email.enabled / message.sms.enabled 任一开启即视为启用,都关闭时跳过。
 func (p *MessageProvider) Setup(ctx context.Context) error {
-	if !p.enabled {
+	v := MustGetViper(ctx)
+	emailOn, smsOn := v.GetBool("message.email.enabled"), v.GetBool("message.sms.enabled")
+	if !emailOn && !smsOn {
+		log.Ctx(ctx).Info().Str("provider", "message").Msg("message disabled, skip")
 		return nil
 	}
 
-	v := MustGetViper(ctx)
 	var opts []message.Option
 
-	if v.GetBool("message.email.enabled") {
+	if emailOn {
 		emailOpts, err := buildEmailOpts(v)
 		if err != nil {
 			return err
@@ -113,7 +102,7 @@ func (p *MessageProvider) Setup(ctx context.Context) error {
 		opts = append(opts, emailOpts...)
 	}
 
-	if v.GetBool("message.sms.enabled") {
+	if smsOn {
 		smsOpts, err := buildSmsOpts(v)
 		if err != nil {
 			return err
@@ -125,8 +114,7 @@ func (p *MessageProvider) Setup(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("provider/message: new manager: %w", err)
 	}
-	p.mgr = mgr
-	ioc.MustInstance(ctx, p.mgr)
+	ioc.FromContext(ctx).Instance(mgr)
 
 	log.Ctx(ctx).Info().Str("provider", "message").Msg("message manager registered")
 	return nil
@@ -329,10 +317,10 @@ func resolveTplField(dir, id, field, inline, file string) (string, error) {
 
 // MustGetMessageManager 从容器获取 *message.Manager,缺失时 panic。
 func MustGetMessageManager(ctx context.Context) *message.Manager {
-	return ioc.MustGet[*message.Manager](ctx)
+	return ioc.FromContext(ctx).MustGetFrom[*message.Manager, *MessageProvider]()
 }
 
 // GetMessageManager 从容器获取 *message.Manager。
 func GetMessageManager(ctx context.Context) (*message.Manager, error) {
-	return ioc.Get[*message.Manager](ctx)
+	return ioc.FromContext(ctx).GetFrom[*message.Manager, *MessageProvider]()
 }
